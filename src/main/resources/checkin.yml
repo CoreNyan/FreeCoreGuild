@@ -1,0 +1,9 @@
+# 签到配置资源
+checkin:
+  enabled: true
+  cooldown: 1d
+  reward:
+    contribution: 10
+    message: '&a签到成功，获得 &e{amount} &a公会贡献。'
+  already-checked-in: '&e今天已经签到过了，请明天再来。'
+  no-guild: '&c你不属于任何公会。'

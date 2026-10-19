@@ -1,0 +1,44 @@
+# 公会 1 级商店实例配置
+level: 1
+reset-timezone: Asia/Shanghai
+
+items:
+  exp_package:
+    material: EXPERIENCE_BOTTLE
+    name: '&a公会专供经验包'
+    price: 50.0
+    limit: { type: DAILY, amount: 5 }
+    MEMBER:
+      material: EXPERIENCE_BOTTLE
+      name: '&a公会专供经验包'
+      price: 50.0
+      limit: { type: DAILY, amount: 5 }
+    ELDER:
+      price: 45.0
+      limit: { type: DAILY, amount: 8 }
+    VICE_PRESIDENT:
+      price: 40.0
+      limit: { type: DAILY, amount: 12 }
+    PRESIDENT:
+      price: 30.0
+      limit: { type: DAILY, amount: 20 }
+
+  diamond_bundle:
+    material: DIAMOND
+    name: '&b璀璨钻石礼包'
+    price: 200.0
+    limit: { type: WEEKLY, amount: 3 }
+    MEMBER:
+      material: DIAMOND
+      name: '&b璀璨钻石礼包'
+      price: 200.0
+      limit: { type: WEEKLY, amount: 3 }
+    ELDER:
+      price: 180.0
+      limit: { type: WEEKLY, amount: 5 }
+    VICE_PRESIDENT:
+      price: 150.0
+      limit: { type: WEEKLY, amount: 8 }
+    PRESIDENT:
+      price: 120.0
+      limit: { type: WEEKLY, amount: 12 }

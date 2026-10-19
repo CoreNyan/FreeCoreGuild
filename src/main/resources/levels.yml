@@ -1,0 +1,112 @@
+# FreeCoreGuild 等级与升级奖励一体化配置文件
+# 每个等级作为一个独立的【Instance】项，包含自身的人数上限、职位配额、假人上限以及会长升级奖励
+
+levels:
+  level_1:
+    level: 1
+    required-prosperity: 0
+    max-members: 3
+    max-presidents: 1
+    max-vice-presidents: 1
+    max-elders: 1
+    fake-player-limit: 0
+    upgrade-rewards: []
+
+  level_2:
+    level: 2
+    required-prosperity: 100000
+    max-members: 5
+    max-presidents: 1
+    max-vice-presidents: 1
+    max-elders: 1
+    fake-player-limit: 1
+    upgrade-rewards:
+      - 'console: give {player} emerald 5'
+
+  level_3:
+    level: 3
+    required-prosperity: 500000
+    max-members: 10
+    max-presidents: 1
+    max-vice-presidents: 2
+    max-elders: 2
+    fake-player-limit: 1
+    upgrade-rewards:
+      - 'console: give {player} diamond 5'
+
+  level_4:
+    level: 4
+    required-prosperity: 1000000
+    max-members: 15
+    max-presidents: 1
+    max-vice-presidents: 2
+    max-elders: 3
+    fake-player-limit: 2
+    upgrade-rewards:
+      - 'console: give {player} netherite_scrap 1'
+
+  level_5:
+    level: 5
+    required-prosperity: 5000000
+    max-members: 20
+    max-presidents: 1
+    max-vice-presidents: 3
+    max-elders: 4
+    fake-player-limit: 2
+    upgrade-rewards:
+      - 'console: give {player} netherite_ingot 1'
+
+  level_6:
+    level: 6
+    required-prosperity: 10000000
+    max-members: 25
+    max-presidents: 1
+    max-vice-presidents: 3
+    max-elders: 5
+    fake-player-limit: 3
+    upgrade-rewards:
+      - 'console: give {player} netherite_ingot 2'
+
+  level_7:
+    level: 7
+    required-prosperity: 20000000
+    max-members: 30
+    max-presidents: 1
+    max-vice-presidents: 4
+    max-elders: 6
+    fake-player-limit: 3
+    upgrade-rewards:
+      - 'console: give {player} netherite_ingot 4'
+
+  level_8:
+    level: 8
+    required-prosperity: 50000000
+    max-members: 40
+    max-presidents: 1
+    max-vice-presidents: 5
+    max-elders: 8
+    fake-player-limit: 4
+    upgrade-rewards:
+      - 'console: give {player} netherite_block 1'
+
+  level_9:
+    level: 9
+    required-prosperity: 88888888
+    max-members: 50
+    max-presidents: 1
+    max-vice-presidents: 6
+    max-elders: 10
+    fake-player-limit: 4
+    upgrade-rewards:
+      - 'console: give {player} netherite_block 2'
+
+  level_10:
+    level: 10
+    required-prosperity: 166666666
+    max-members: 100
+    max-presidents: 2
+    max-vice-presidents: 10
+    max-elders: 20
+    fake-player-limit: 5
+    upgrade-rewards:
+      - 'console: give {player} netherite_block 5'

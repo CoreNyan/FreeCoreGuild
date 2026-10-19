@@ -1,0 +1,20 @@
+name: FreeCoreGuild
+version: '${version}'
+main: io.github.freecoreguild.FreeCoreGuildPlugin
+api-version: '1.21'
+author: FreeCore
+depend: [Vault]
+commands:
+  guild:
+    description: Guild management
+    usage: /guild <create|info|checkin|donate|upgrade|promote|demote|kick|transfer|reward|leave|disband|invite|accept|deny>
+    aliases: [g]
+  gc:
+    description: Guild chat channel
+    usage: /gc <message>
+  gshop:
+    description: Guild shop catalog and purchase-limit check
+    usage: /gshop [list|check <item> [amount]]
+permissions:
+  freecoreguild.use:
+    default: true

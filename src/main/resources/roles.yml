@@ -1,0 +1,14 @@
+# 公会职位配置资源，可由后续管理模块读取
+roles:
+  MEMBER:
+    display-name: '成员'
+    permissions: [guild.info, guild.checkin, guild.leave]
+  ELDER:
+    display-name: '长老'
+    permissions: [guild.info, guild.checkin, guild.invite]
+  VICE_PRESIDENT:
+    display-name: '副会长'
+    permissions: [guild.info, guild.checkin, guild.invite, guild.manage, guild.fake-player]
+  PRESIDENT:
+    display-name: '会长'
+    permissions: [guild.info, guild.checkin, guild.invite, guild.manage, guild.fake-player, guild.disband]

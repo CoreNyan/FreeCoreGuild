@@ -1,0 +1,29 @@
+# 公会 3 级及以上商店实例配置
+level: 3
+reset-timezone: Asia/Shanghai
+
+items:
+  netherite_upgrade:
+    material: NETHERITE_UPGRADE_SMITHING_TEMPLATE
+    name: '&8下界合金锻造模板'
+    price: 3000.0
+    limit: { type: MONTHLY, amount: 1 }
+    VICE_PRESIDENT:
+      material: NETHERITE_UPGRADE_SMITHING_TEMPLATE
+      name: '&8下界合金锻造模板'
+      price: 3000.0
+      limit: { type: MONTHLY, amount: 1 }
+    PRESIDENT:
+      price: 2500.0
+      limit: { type: MONTHLY, amount: 2 }
+
+  elytra_wing:
+    material: ELYTRA
+    name: '&5鞘翅'
+    price: 8000.0
+    limit: { type: MONTHLY, amount: 1 }
+    PRESIDENT:
+      material: ELYTRA
+      name: '&5鞘翅'
+      price: 8000.0
+      limit: { type: MONTHLY, amount: 1 }

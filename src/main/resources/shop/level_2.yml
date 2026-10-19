@@ -1,0 +1,41 @@
+# 公会 2 级商店实例配置
+level: 2
+reset-timezone: Asia/Shanghai
+
+items:
+  golden_apple:
+    material: ENCHANTED_GOLDEN_APPLE
+    name: '&6附魔金苹果'
+    price: 1000.0
+    limit: { type: WEEKLY, amount: 1 }
+    MEMBER:
+      material: ENCHANTED_GOLDEN_APPLE
+      name: '&6附魔金苹果'
+      price: 1000.0
+      limit: { type: WEEKLY, amount: 1 }
+    ELDER:
+      price: 900.0
+      limit: { type: WEEKLY, amount: 2 }
+    VICE_PRESIDENT:
+      price: 800.0
+      limit: { type: WEEKLY, amount: 3 }
+    PRESIDENT:
+      price: 600.0
+      limit: { type: WEEKLY, amount: 5 }
+
+  totem_of_undying:
+    material: TOTEM_OF_UNDYING
+    name: '&e不死图腾'
+    price: 800.0
+    limit: { type: DAILY, amount: 1 }
+    ELDER:
+      material: TOTEM_OF_UNDYING
+      name: '&e不死图腾'
+      price: 800.0
+      limit: { type: DAILY, amount: 1 }
+    VICE_PRESIDENT:
+      price: 700.0
+      limit: { type: DAILY, amount: 2 }
+    PRESIDENT:
+      price: 500.0
+      limit: { type: DAILY, amount: 3 }

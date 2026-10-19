@@ -1,0 +1,27 @@
+# FreeCoreGuild 插件主配置文件
+prefix: '&b&l公会 &f&l>>> &f'
+
+storage:
+  type: mysql # 开启 MySQL 全局持久化与跨服数据同步
+  mysql:
+    jdbc: 改我
+    username: idk
+    password: 哈哈哈
+    pool-size: 5
+
+guild:
+  create-cost: 10000.0 # 创建公会花费H币（默认10000，可配置）
+  donate-minimum: 1 # 最小捐献数量
+  prosperity-per-coin: 1.0 # 1 H币 = 1 繁荣度
+  leave-cooldown-hours: 24 # 退出公会后重新加入或创建公会的冷却时长（小时，默认24小时）
+
+  checkin:
+    base-prosperity: 1000 # 平时每日签到繁荣度
+    holiday-prosperity: 3000 # 周末/节假日签到繁荣度
+    reward-coins: 0.0 # 无H币奖励
+    base-reward-item:
+      material: RAW_GOLD
+      amount: 10 # 平时10个粗金/金矿石
+    weekend-reward-item:
+      material: RAW_GOLD
+      amount: 30 # 周末30个粗金/金矿石
