@@ -4,6 +4,7 @@ import io.github.freecoreguild.api.GuildProvider.Role;
 import io.github.freecoreguild.lang.Lang;
 import io.github.freecoreguild.service.GuildRedisBridge;
 import io.github.freecoreguild.service.GuildService;
+import io.github.freecoreguild.service.GuildService.MemberInfo;
 import io.github.freecoreguild.service.MySqlGuildService;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -25,13 +26,13 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
     private final GuildRedisBridge redisBridge;
 
     private static final List<String> SUB_COMMANDS = List.of(
-            "help", "menu", "info", "checkin", "donate", "create", "apply",
+            "help", "menu", "info", "checkin", "donate", "create", "apply", "join",
             "members", "transfer", "promote", "demote", "kick", "leave", "disband",
             "reward", "invite", "accept", "deny", "reload", "admin"
     );
 
     private static final List<String> ADMIN_SUB_COMMANDS = List.of(
-            "reload", "resetcheckin", "clearcooldown", "setxp", "refreshshop"
+            "reload", "resetcheckin", "clearcooldown", "setxp", "refreshshop", "checkin", "cooldown", "prosperity"
     );
 
     public GuildCommand(GuildService service, EconomyGateway economy, GuildMenuListener menu, GuildRedisBridge redisBridge) {
@@ -44,12 +45,22 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] a) {
         if (a.length > 0 && ("admin".equalsIgnoreCase(a[0]) || "debug".equalsIgnoreCase(a[0]))) {
-            handleAdmin(sender, a);
+            try {
+                handleAdmin(sender, a);
+            } catch (IllegalStateException e) {
+                Bukkit.getLogger().warning("[FreeCoreGuild] Admin operation failed: " + e.getMessage());
+                sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-operation-failed"));
+            }
             return true;
         }
 
         if (!(sender instanceof Player p)) {
             sender.sendMessage(Lang.msg("player-only"));
+            return true;
+        }
+
+        if (!p.hasPermission("freecoreguild.use")) {
+            p.sendMessage(Lang.getPrefix() + Lang.text("commands.no-permission"));
             return true;
         }
 
@@ -59,6 +70,7 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
         }
 
         String op = a[0].toLowerCase(Locale.ROOT);
+        try {
         switch (op) {
             case "help", "帮助", "?" -> {
                 sendHelp(p);
@@ -66,11 +78,11 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
             }
             case "reload", "重载" -> {
                 if (!p.isOp() && !p.hasPermission("freecoreguild.admin")) {
-                    p.sendMessage(Lang.getPrefix() + "§c你没有权限执行重载指令！");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.reload-no-permission"));
                     return true;
                 }
                 FreeCoreGuildPlugin.getInstance().reloadPluginConfig();
-                p.sendMessage(Lang.getPrefix() + "§a公会配置文件、等级与商城配置已成功重载！");
+                p.sendMessage(Lang.getPrefix() + Lang.text("commands.reloaded"));
                 return true;
             }
             case "menu", "gui", "菜单" -> menu.openMain(p);
@@ -85,24 +97,21 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                     return true;
                 }
                 if (economy != null && economy.donate(p, amount)) {
-                    p.sendMessage(Lang.msg("donated", "amount", String.valueOf(amount), "prosperity", String.valueOf(amount)));
-                    service.guildOf(p.getUniqueId()).ifPresent(g -> {
-                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
-                                "§8[§b公会§8] §e" + p.getName() + " §a向公会捐献了 §e" + amount + " H币§a，繁荣度增加 §e" + amount + "§a！");
-                    });
+                    p.sendMessage(Lang.msg("donated", "amount", String.valueOf(amount), "prosperity", String.valueOf(economy.prosperityFor(amount))));
+
                 } else {
                     p.sendMessage(Lang.msg("donate-failed"));
                 }
             }
             case "create", "创建" -> {
                 if (a.length < 2) {
-                    p.sendMessage(Lang.getPrefix() + "§6用法：§e/guild create <公会名称>");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.usage-create"));
                     return true;
                 }
                 long cd = service.getLeaveCooldownRemainingMillis(p.getUniqueId());
                 if (cd > 0) {
                     long hours = (cd / 3600_000L) + 1;
-                    p.sendMessage(Lang.getPrefix() + "§c你刚退出公会不久，尚在冷却期内（剩余约 §e" + hours + " §c小时），暂时无法创建公会！");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.create-cooldown", "hours", String.valueOf(hours)));
                     return true;
                 }
                 if (economy != null && economy.create(p, a[1])) {
@@ -114,11 +123,16 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                     p.sendMessage(Lang.msg("create-failed", "cost", String.valueOf((long)cost)));
                 }
             }
-            case "info", "信息" -> service.guildOf(p.getUniqueId()).ifPresentOrElse(
-                    g -> p.sendMessage(Lang.msg("info", "name", g.name(), "level", String.valueOf(g.level()), "xp", String.valueOf(g.xp()), "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers()))),
-                    () -> p.sendMessage(Lang.msg("no-guild"))
+            case "info", "信息" -> service.guildOf(p.getUniqueId()).ifPresentOrElse(g -> {
+                        long nextProsperity = FreeCoreGuildPlugin.getInstance().getNextLevelProsperity(g.level());
+                        String nextText = nextProsperity < 0 ? Lang.text("messages.max-level")
+                                : FreeCoreGuildPlugin.getInstance().formatProsperity(nextProsperity);
+                        p.sendMessage(Lang.msg("info", "name", g.name(), "level", String.valueOf(g.level()),
+                                "xp", FreeCoreGuildPlugin.getInstance().formatProsperity(g.xp()),
+                                "next_xp", nextText, "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers())));
+                    }, () -> p.sendMessage(Lang.msg("no-guild"))
             );
-            case "apply", "申请" -> {
+            case "apply", "join", "申请", "加入" -> {
                 if (a.length < 2) {
                     menu.openAllGuildsList(p);
                     return true;
@@ -126,13 +140,14 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                 long cd = service.getLeaveCooldownRemainingMillis(p.getUniqueId());
                 if (cd > 0) {
                     long hours = (cd / 3600_000L) + 1;
-                    p.sendMessage(Lang.getPrefix() + "§c你刚退出公会不久，尚在冷却期内（剩余约 §e" + hours + " §c小时），暂时无法申请加入公会！");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.apply-cooldown", "hours", String.valueOf(hours)));
                     return true;
                 }
                 if (service.apply(p.getUniqueId(), a[1])) {
                     p.sendMessage(Lang.msg("app-submitted", "name", a[1]));
                     String appNotify = Lang.msg("app-received-notify", "player", p.getName());
                     FreeCoreGuildPlugin.getInstance().broadcastGuildCross(a[1], appNotify);
+                    syncAllNodes();
                 } else {
                     p.sendMessage(Lang.msg("app-failed"));
                 }
@@ -145,103 +160,89 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                     return true;
                 }
                 UUID targetId = target(a[1]);
-                if (targetId == null) {
+                var guild = service.guildOf(p.getUniqueId()).orElse(null);
+                var targetGuild = targetId == null ? null : service.guildOf(targetId).orElse(null);
+                if (guild == null || targetGuild == null || !guild.name().equalsIgnoreCase(targetGuild.name())) {
                     p.sendMessage(Lang.msg("transfer-not-found", "name", a[1]));
                     return true;
                 }
-                var res = service.transferWithReason(p.getUniqueId(), targetId);
-                if (res.success()) {
-                    p.sendMessage(Lang.msg("transfer-success", "player", a[1]));
-                    syncAllNodes();
-                } else {
-                    p.sendMessage(Lang.msg("transfer-failed", "reason", res.reason()));
+                String targetName = service.getMembers(p.getUniqueId()).stream()
+                        .filter(member -> member.uuid().equals(targetId))
+                        .map(MemberInfo::name).findFirst().orElse(null);
+                if (targetName == null) {
+                    p.sendMessage(Lang.msg("transfer-not-found", "name", a[1]));
+                    return true;
                 }
+                menu.requestTransferConfirmation(p, targetId, targetName);
             }
             case "checkin", "签到" -> {
+                int beforeLevel = service.guildOf(p.getUniqueId()).map(g -> g.level()).orElse(0);
                 var res = service.checkinPlayer(p.getUniqueId());
                 if (res.success()) {
                     if (res.goldAmount() > 0) {
-                        p.getInventory().addItem(new ItemStack(Material.RAW_GOLD, res.goldAmount()));
+                        java.time.DayOfWeek dow = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).getDayOfWeek();
+                        boolean isWeekend = (dow == java.time.DayOfWeek.SATURDAY || dow == java.time.DayOfWeek.SUNDAY);
+                        Material rewardMat = FreeCoreGuildPlugin.getInstance().getCheckinRewardMaterial(isWeekend);
+                        p.getInventory().addItem(new ItemStack(rewardMat, res.goldAmount()));
                     }
-                    p.sendMessage(Lang.getPrefix() + "§a今日公会签到成功！公会增加 §e" + res.prosperity() + " §a点繁荣度，获得奖励 §e" + res.goldAmount() + " 个粗金矿石§a！");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.checkin-success", "prosperity", String.valueOf(res.prosperity()), "amount", String.valueOf(res.goldAmount())));
                     service.guildOf(p.getUniqueId()).ifPresent(g -> {
                         FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
-                                "§8[§b公会§8] §e" + p.getName() + " §a完成了今日公会签到，公会增加 §e" + res.prosperity() + " §a点繁荣度！");
+                                Lang.text("broadcast.checkin", "player", String.valueOf(p.getName()), "prosperity", String.valueOf(res.prosperity())));
+                        if (g.level() > beforeLevel) {
+                            FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                                    Lang.text("broadcast.upgrade", "level", String.valueOf(g.level())));
+                        }
                     });
+                    syncAllNodes();
+                    FreeCoreGuildPlugin.getInstance().refreshGuildMenus();
                 } else {
                     p.sendMessage(Lang.msg("checkin-failed", "message", res.message()));
                 }
             }
             case "reward", "奖励" -> claim(p, a.length > 1 ? parseInt(a[1]) : -1);
             case "promote", "升职" -> {
-                if (a.length < 2) { p.sendMessage(Lang.getPrefix() + "§6用法：§e/guild promote <玩家名>"); return true; }
+                if (a.length < 2) { p.sendMessage(Lang.getPrefix() + Lang.text("commands.usage-promote")); return true; }
                 UUID targetId = target(a[1]);
                 if (targetId != null && service.promote(p.getUniqueId(), targetId)) {
-                    p.sendMessage(Lang.msg("promoted", "player", a[1]));
+                    Role newRole = service.roleOf(targetId).orElse(Role.MEMBER);
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.promoted", "player", String.valueOf(a[1]), "role", String.valueOf(newRole.getMenuDisplay())));
+                    service.guildOf(p.getUniqueId()).ifPresent(g -> {
+                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                                Lang.text("broadcast.promote", "player", String.valueOf(a[1]), "role", String.valueOf(newRole.getMenuDisplay())));
+                    });
                     syncAllNodes();
                 } else {
                     p.sendMessage(Lang.msg("promote-failed"));
                 }
             }
             case "demote", "降职" -> {
-                if (a.length < 2) { p.sendMessage(Lang.getPrefix() + "§6用法：§e/guild demote <玩家名>"); return true; }
+                if (a.length < 2) { p.sendMessage(Lang.getPrefix() + Lang.text("commands.usage-demote")); return true; }
                 UUID targetId = target(a[1]);
                 if (targetId != null && service.demote(p.getUniqueId(), targetId)) {
-                    p.sendMessage(Lang.msg("demoted", "player", a[1]));
+                    Role newRole = service.roleOf(targetId).orElse(Role.MEMBER);
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.demoted", "player", String.valueOf(a[1]), "role", String.valueOf(newRole.getMenuDisplay())));
+                    service.guildOf(p.getUniqueId()).ifPresent(g -> {
+                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                                Lang.text("broadcast.demote", "player", String.valueOf(a[1]), "role", String.valueOf(newRole.getMenuDisplay())));
+                    });
                     syncAllNodes();
                 } else {
                     p.sendMessage(Lang.msg("demote-failed"));
                 }
             }
             case "kick", "踢出" -> {
-                if (a.length < 2) { p.sendMessage(Lang.getPrefix() + "§6用法：§e/guild kick <玩家名>"); return true; }
+                if (a.length < 2) { p.sendMessage(Lang.getPrefix() + Lang.text("commands.usage-kick")); return true; }
                 UUID targetId = target(a[1]);
-                if (targetId != null && service.kick(p.getUniqueId(), targetId)) {
-                    p.sendMessage(Lang.msg("kicked", "player", a[1]));
-                    service.guildOf(p.getUniqueId()).ifPresent(g -> {
-                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
-                                "§8[§b公会§8] §c成员 §e" + a[1] + " §c已被移出公会！");
-                    });
-                    syncAllNodes();
-                } else {
-                    p.sendMessage(Lang.msg("kick-failed"));
-                }
+                if (targetId != null) menu.requestKickConfirmation(p, targetId, a[1]);
+                else p.sendMessage(Lang.msg("kick-failed"));
             }
-            case "leave", "退出" -> {
-                var role = service.roleOf(p.getUniqueId()).orElse(Role.MEMBER);
-                if (role == Role.PRESIDENT) {
-                    p.sendMessage(Lang.msg("leave-failed-owner"));
-                    return true;
-                }
-                String guildName = service.guildOf(p.getUniqueId()).map(g -> g.name()).orElse("");
-                if (service.leave(p.getUniqueId())) {
-                    p.sendMessage(Lang.msg("left"));
-                    if (!guildName.isEmpty()) {
-                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(guildName,
-                                "§8[§b公会§8] §e" + p.getName() + " §7退出了公会。");
-                    }
-                    syncAllNodes();
-                } else {
-                    p.sendMessage(Lang.msg("leave-failed"));
-                }
-            }
-            case "disband", "解散" -> {
-                String guildName = service.guildOf(p.getUniqueId()).map(g -> g.name()).orElse("");
-                if (service.disband(p.getUniqueId())) {
-                    p.sendMessage(Lang.msg("disbanded"));
-                    if (!guildName.isEmpty()) {
-                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(guildName,
-                                "§8[§b公会§8] §c公会已被会长解散！");
-                    }
-                    syncAllNodes();
-                } else {
-                    p.sendMessage(Lang.msg("disband-failed"));
-                }
-            }
+            case "leave", "退出" -> menu.requestLeaveConfirmation(p);
+            case "disband", "解散" -> menu.requestDisbandConfirmation(p);
             // 需求8: 邀请成员 /guild invite <player>
             case "invite", "邀请" -> {
                 if (a.length < 2) {
-                    p.sendMessage(Lang.getPrefix() + "§6用法：§e/guild invite <玩家名>");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.usage-invite"));
                     return true;
                 }
                 var optGuild = service.guildOf(p.getUniqueId());
@@ -257,7 +258,7 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                 String targetName = a[1];
                 UUID targetId = service.resolvePlayerUuid(targetName);
                 if (targetId == null) {
-                    p.sendMessage(Lang.getPrefix() + "§c未找到玩家“" + targetName + "”！");
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.player-not-found", "player", String.valueOf(targetName)));
                     return true;
                 }
                 if (service.guildOf(targetId).isPresent()) {
@@ -270,10 +271,12 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                 }
 
                 String guildName = optGuild.get().name();
-                if (redisBridge != null) {
-                    redisBridge.setInvite(targetId, guildName, p.getName());
+                if (!service.addInvite(targetId, guildName, p.getName())) {
+                    p.sendMessage(Lang.getPrefix() + Lang.text("commands.invite-save-failed"));
+                    return true;
                 }
                 p.sendMessage(Lang.msg("invite-sent", "player", targetName));
+                FreeCoreGuildPlugin.getInstance().refreshInviteMenus(targetId);
 
                 // 跨服通知被邀请玩家
                 String inviteMsg = Lang.msg("invite-received", "inviter", p.getName(), "guild", guildName);
@@ -298,23 +301,19 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                     p.sendMessage(Lang.msg("cooldown-active", "hours", String.valueOf(hours)));
                     return true;
                 }
-                if (redisBridge == null) {
+                List<GuildService.GuildInvite> invites = service.getInvitesFor(p.getUniqueId());
+                if (invites.isEmpty()) {
                     p.sendMessage(Lang.msg("invite-none"));
                     return true;
                 }
-                String[] inv = redisBridge.getInvite(p.getUniqueId());
-                if (inv == null) {
-                    p.sendMessage(Lang.msg("invite-none"));
-                    return true;
-                }
-                String gName = inv[0];
-                redisBridge.removeInvite(p.getUniqueId());
-
-                if (service.joinDirectly(p.getUniqueId(), gName)) {
+                GuildService.GuildInvite invite = invites.get(0);
+                String gName = invite.guildName();
+                if (service.acceptInvite(p.getUniqueId(), gName)) {
                     p.sendMessage(Lang.msg("invite-accepted", "guild", gName));
                     FreeCoreGuildPlugin.getInstance().broadcastGuildCross(gName,
-                            Lang.msg("invite-accepted-broadcast", "player", p.getName()));
+                            Lang.text("broadcast.join", "player", p.getName()));
                     syncAllNodes();
+                    FreeCoreGuildPlugin.getInstance().refreshGuildMenus();
                     menu.openMain(p);
                 } else {
                     p.sendMessage(Lang.msg("app-approved-failed"));
@@ -322,18 +321,16 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
             }
             // 需求8: 拒绝邀请 /guild deny
             case "deny", "拒绝" -> {
-                if (redisBridge == null) {
+                List<GuildService.GuildInvite> invites = service.getInvitesFor(p.getUniqueId());
+                if (invites.isEmpty()) {
                     p.sendMessage(Lang.msg("invite-none"));
                     return true;
                 }
-                String[] inv = redisBridge.getInvite(p.getUniqueId());
-                if (inv == null) {
-                    p.sendMessage(Lang.msg("invite-none"));
-                    return true;
-                }
-                String gName = inv[0];
-                String inviterName = inv[1];
-                redisBridge.removeInvite(p.getUniqueId());
+                GuildService.GuildInvite invite = invites.get(0);
+                String gName = invite.guildName();
+                String inviterName = invite.inviterName();
+                service.removeInvite(p.getUniqueId(), gName);
+                FreeCoreGuildPlugin.getInstance().refreshInviteMenus(p.getUniqueId());
 
                 p.sendMessage(Lang.msg("invite-rejected", "guild", gName));
                 UUID inviterUuid = service.resolvePlayerUuid(inviterName);
@@ -342,13 +339,17 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                     Player onlineInviter = Bukkit.getPlayer(inviterUuid);
                     if (onlineInviter != null && onlineInviter.isOnline()) {
                         onlineInviter.sendMessage(rejectMsg);
-                    } else {
+                    } else if (redisBridge != null) {
                         String serverId = Bukkit.getPort() == 25570 ? "technical" : "survival";
                         redisBridge.publish("NOTIFY_PLAYER|" + inviterUuid + "|" + serverId + "|" + rejectMsg);
                     }
                 }
             }
             default -> sendHelp(p);
+        }
+        } catch (IllegalStateException e) {
+            Bukkit.getLogger().warning("[FreeCoreGuild] Guild operation failed: " + e.getMessage());
+            p.sendMessage(Lang.getPrefix() + Lang.text("commands.operation-failed"));
         }
         return true;
     }
@@ -360,99 +361,93 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
     }
 
     private void sendHelp(Player p) {
-        p.sendMessage(Lang.getPrefix() + "§6===== FreeCore 公会系统帮助 =====");
-        p.sendMessage("§e/guild §7- 打开公会主面板 GUI");
-        p.sendMessage("§e/guild info §7- 查看当前公会信息");
-        p.sendMessage("§e/guild checkin §7- 每日公会签到");
-        p.sendMessage("§e/guild donate [数量] §7- 为公会捐献 H币 (1H币=1繁荣度)");
-        p.sendMessage("§e/guild create <名称> §7- 创建全新公会");
-        p.sendMessage("§e/guild apply [名称] §7- 申请加入公会 / 浏览公会列表");
-        p.sendMessage("§e/guild members §7- 查看公会成员列表");
-        p.sendMessage("§e/guild invite <玩家名> §7- 邀请玩家加入公会 (长老及以上)");
-        p.sendMessage("§e/guild accept §7- 接受公会入会邀请");
-        p.sendMessage("§e/guild deny §7- 拒绝公会入会邀请");
-        p.sendMessage("§e/gc <消息> §7- 公会跨服聊天频道");
-        p.sendMessage("§e/guild transfer [玩家名] §7- 会长转让公会");
-        p.sendMessage("§e/guild promote <玩家名> §7- 晋升公会成员职位");
-        p.sendMessage("§e/guild demote <玩家名> §7- 降低公会成员职位");
-        p.sendMessage("§e/guild kick <玩家名> §7- 将成员踢出公会");
-        p.sendMessage("§e/guild leave §7- 退出当前公会");
-        p.sendMessage("§e/guild disband §7- 会长解散公会");
+        p.sendMessage(Lang.getPrefix() + Lang.text("commands.help-title"));
+        Lang.lines("commands.help").forEach(p::sendMessage);
         if (p.isOp() || p.hasPermission("freecoreguild.admin")) {
-            p.sendMessage("§b/guild reload §7- 重载公会所有配置文件");
-            p.sendMessage("§b/guild admin §7- 查看 OP/Debug 管理员指令");
+            Lang.lines("commands.help-admin").forEach(p::sendMessage);
         }
     }
 
     private void handleAdmin(CommandSender sender, String[] a) {
         if (!sender.isOp() && !sender.hasPermission("freecoreguild.admin")) {
-            sender.sendMessage(Lang.getPrefix() + "§c你没有权限执行该公会管理指令！");
+            sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-no-permission"));
             return;
         }
 
         if (a.length < 2) {
-            sender.sendMessage(Lang.getPrefix() + "§6=== 公会 OP/Debug 管理指令 ===");
-            sender.sendMessage("§e/guild admin reload §7- 重载公会配置与商城");
-            sender.sendMessage("§e/guild admin resetcheckin <玩家名> §7- 跨服重置该玩家今日签到");
-            sender.sendMessage("§e/guild admin clearcooldown <玩家名> §7- 跨服清空该玩家的退会冷却时间");
-            sender.sendMessage("§e/guild admin setxp <公会名> <繁荣度> §7- 设置公会繁荣度 (自动触发升降级)");
-            sender.sendMessage("§e/guild admin refreshshop §7- 跨服刷新/重置所有公会商店限购");
+            sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-help-title"));
+            Lang.lines("commands.admin-help").forEach(sender::sendMessage);
             return;
         }
 
         String sub = a[1].toLowerCase(Locale.ROOT);
+        // Accept descriptive forms without changing the original compact command syntax.
+        if (List.of("checkin", "cooldown").contains(sub)) {
+            String action = "checkin".equals(sub) ? "reset" : "clear";
+            if (a.length < 4 || !action.equalsIgnoreCase(a[2])) {
+                sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-usage-action", "sub", String.valueOf(sub), "action", String.valueOf(action)));
+                return;
+            }
+            a = new String[]{a[0], "checkin".equals(sub) ? "resetcheckin" : "clearcooldown", a[3]};
+            sub = a[1];
+        } else if (List.of("prosperity", "propserity").contains(sub)) {
+            if (a.length > 2 && "set".equalsIgnoreCase(a[2])) {
+                a = a.length >= 5 ? new String[]{a[0], "setxp", a[3], a[4]} : new String[]{a[0], "setxp"};
+            }
+            sub = "setxp";
+        }
         switch (sub) {
             case "reload" -> {
                 FreeCoreGuildPlugin.getInstance().reloadPluginConfig();
-                sender.sendMessage(Lang.getPrefix() + "§a公会配置文件、等级与商城配置已成功重载！");
+                sender.sendMessage(Lang.getPrefix() + Lang.text("commands.reloaded"));
             }
             case "resetcheckin" -> {
                 if (a.length < 3) {
-                    sender.sendMessage(Lang.getPrefix() + "§6用法：§e/guild admin resetcheckin <玩家名>");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-usage-resetcheckin"));
                     return;
                 }
                 String targetPlayer = a[2];
                 // 修复2: 必须跨服准确重置签到，不能无论输谁都说成功
                 boolean ok = service.resetCheckinTodayByName(targetPlayer);
                 if (ok) {
-                    sender.sendMessage(Lang.getPrefix() + "§a已成功重置玩家 §e" + targetPlayer + " §a的今日公会签到状态！");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-checkin-reset", "player", String.valueOf(targetPlayer)));
                     syncAllNodes();
                 } else {
-                    sender.sendMessage(Lang.getPrefix() + "§c重置失败！未找到玩家“§e" + targetPlayer + "§c”的信息。");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-checkin-reset-failed", "player", String.valueOf(targetPlayer)));
                 }
             }
             case "clearcooldown" -> {
                 if (a.length < 3) {
-                    sender.sendMessage(Lang.getPrefix() + "§6用法：§e/guild admin clearcooldown <玩家名>");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-usage-clearcooldown"));
                     return;
                 }
                 String targetPlayer = a[2];
                 // 修复2: 跨服准确清空冷却
                 boolean ok = service.clearLeaveCooldownByName(targetPlayer);
                 if (ok) {
-                    sender.sendMessage(Lang.getPrefix() + "§a已成功清空玩家 §e" + targetPlayer + " §a的退出公会冷却时间！");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-cooldown-cleared", "player", String.valueOf(targetPlayer)));
                     syncAllNodes();
                 } else {
-                    sender.sendMessage(Lang.getPrefix() + "§c清除失败！未找到玩家“§e" + targetPlayer + "§c”的信息。");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-cooldown-clear-failed", "player", String.valueOf(targetPlayer)));
                 }
             }
             case "setxp" -> {
                 if (a.length < 4) {
-                    sender.sendMessage(Lang.getPrefix() + "§6用法：§e/guild admin setxp <公会名> <繁荣度>");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-usage-setxp"));
                     return;
                 }
                 String guildName = a[2];
                 long xp = parse(a[3]);
                 if (xp < 0) {
-                    sender.sendMessage(Lang.getPrefix() + "§c繁荣度数值必须大于等于0！");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-prosperity-invalid"));
                     return;
                 }
                 int newLvl = service.setGuildProsperity(guildName, xp);
                 if (newLvl > 0) {
-                    sender.sendMessage(Lang.getPrefix() + "§a成功将公会 §e" + guildName + " §a的繁荣度设为 §e" + xp + "§a，当前公会等级自动调整为 §eLv." + newLvl + "§a！");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-prosperity-set", "guild", String.valueOf(guildName), "xp", String.valueOf(xp), "newLvl", String.valueOf(newLvl)));
                     syncAllNodes();
                 } else {
-                    sender.sendMessage(Lang.getPrefix() + "§c未找到名称为 §e" + guildName + " §c的公会！");
+                    sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-prosperity-set-failed", "guild", String.valueOf(guildName)));
                 }
             }
             case "refreshshop" -> {
@@ -466,9 +461,9 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                 if (redisBridge != null) {
                     redisBridge.publish("SHOP_REFRESH|||");
                 }
-                sender.sendMessage(Lang.getPrefix() + Lang.msg("admin-shop-refreshed"));
+                sender.sendMessage(Lang.msg("admin-shop-refreshed"));
             }
-            default -> sender.sendMessage(Lang.getPrefix() + "§c未知管理指令，请输入 §e/guild admin §c查看帮助。");
+            default -> sender.sendMessage(Lang.getPrefix() + Lang.text("commands.admin-unknown"));
         }
     }
 
@@ -504,6 +499,9 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
             }
         }
         p.sendMessage(Lang.msg("reward-claimed", "level", String.valueOf(level)));
+        service.guildOf(p.getUniqueId()).ifPresent(g -> FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                Lang.text("broadcast.reward",
+                        "player", p.getName(), "level", String.valueOf(level))));
         syncAllNodes();
     }
 
@@ -523,6 +521,26 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
     // 修复1: 完善指令 Tab 补全
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        boolean adminCommand = args.length > 0 && ("admin".equalsIgnoreCase(args[0]) || "debug".equalsIgnoreCase(args[0]));
+        if (adminCommand && !sender.isOp() && !sender.hasPermission("freecoreguild.admin")) return Collections.emptyList();
+        if (adminCommand && args.length >= 3) {
+            String sub = args[1].toLowerCase(Locale.ROOT);
+            String prefix = args[args.length - 1].toLowerCase(Locale.ROOT);
+            if (List.of("checkin", "cooldown").contains(sub) && args.length == 3) {
+                String action = "checkin".equals(sub) ? "reset" : "clear";
+                return action.startsWith(prefix) ? List.of(action) : List.of();
+            }
+            boolean playerTarget = args.length == 3 && List.of("resetcheckin", "clearcooldown").contains(sub)
+                    || args.length == 4 && ("checkin".equals(sub) && "reset".equalsIgnoreCase(args[2])
+                    || "cooldown".equals(sub) && "clear".equalsIgnoreCase(args[2]));
+            if (playerTarget) return Bukkit.getOnlinePlayers().stream().map(Player::getName)
+                    .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(prefix)).collect(Collectors.toList());
+            boolean guildTarget = args.length == 3 && List.of("setxp", "prosperity", "propserity").contains(sub)
+                    || args.length == 4 && List.of("prosperity", "propserity").contains(sub) && "set".equalsIgnoreCase(args[2]);
+            if (guildTarget) return service.getAllGuilds().stream().map(g -> g.name())
+                    .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(prefix)).collect(Collectors.toList());
+            return Collections.emptyList();
+        }
         if (args.length == 1) {
             String prefix = args[0].toLowerCase(Locale.ROOT);
             return SUB_COMMANDS.stream()
@@ -532,7 +550,7 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
 
         if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if ("admin".equals(sub)) {
+            if (adminCommand) {
                 if (!sender.isOp() && !sender.hasPermission("freecoreguild.admin")) {
                     return Collections.emptyList();
                 }
@@ -553,29 +571,8 @@ public final class GuildCommand implements CommandExecutor, TabCompleter {
                 return playerNames;
             }
 
-            if ("apply".equals(sub)) {
+            if ("apply".equals(sub) || "join".equals(sub)) {
                 String prefix = args[1].toLowerCase(Locale.ROOT);
-                return service.getAllGuilds().stream()
-                        .map(g -> g.name())
-                        .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(prefix))
-                        .collect(Collectors.toList());
-            }
-        }
-
-        if (args.length == 3 && "admin".equalsIgnoreCase(args[0])) {
-            String adminSub = args[1].toLowerCase(Locale.ROOT);
-            if (List.of("resetcheckin", "clearcooldown").contains(adminSub)) {
-                String prefix = args[2].toLowerCase(Locale.ROOT);
-                List<String> playerNames = new ArrayList<>();
-                for (Player p : Bukkit.getOnlinePlayers()) {
-                    if (p.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) {
-                        playerNames.add(p.getName());
-                    }
-                }
-                return playerNames;
-            }
-            if ("setxp".equals(adminSub)) {
-                String prefix = args[2].toLowerCase(Locale.ROOT);
                 return service.getAllGuilds().stream()
                         .map(g -> g.name())
                         .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(prefix))

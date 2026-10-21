@@ -3,6 +3,7 @@ package io.github.freecoreguild;
 import io.github.freecoreguild.api.GuildProvider;
 import io.github.freecoreguild.lang.Lang;
 import io.github.freecoreguild.service.*;
+import org.bukkit.Material;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -23,6 +24,16 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
     private GuildBaseTransferService baseTransferService;
     private NavigableMap<Integer, LevelConfig> levels;
     private GuildRedisBridge redisBridge;
+    private GuildPlaceholderExpansion placeholderExpansion;
+
+    /** Shared privacy gate for chat bridges and perception listeners. */
+    public boolean isChatInputPending(java.util.UUID player) {
+        return menus != null && menus.isChatInputPending(player);
+    }
+
+    public boolean isChatInputCaptured(java.util.UUID player) {
+        return menus != null && menus.isChatInputCaptured(player);
+    }
 
     public static FreeCoreGuildPlugin getInstance() {
         return instance;
@@ -34,6 +45,16 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
 
     public ShopService getShopService() {
         return shopService;
+    }
+
+    public void refreshGuildMenus() {
+        refreshInviteMenus(null);
+    }
+
+    public void refreshInviteMenus(java.util.UUID target) {
+        if (isEnabled()) getServer().getScheduler().runTask(this, () -> {
+            if (menus != null) menus.refreshOpenMenus(target);
+        });
     }
 
     public void broadcastGuildCross(String guildName, String message) {
@@ -60,9 +81,21 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
         return List.of();
     }
 
+    /** Returns the next cumulative prosperity threshold, or -1 when max level. */
+    public long getNextLevelProsperity(int currentLevel) {
+        if (levels == null) return -1L;
+        var next = levels.higherEntry(currentLevel);
+        return next == null ? -1L : next.getValue().requiredXp();
+    }
+
+    public String formatProsperity(long prosperity) {
+        return java.text.NumberFormat.getIntegerInstance(java.util.Locale.CHINA).format(prosperity);
+    }
+
     public void reloadPluginConfig() {
         reloadConfig();
         Lang.init(this);
+        applyCommandLanguage();
 
         File levelsFile = new File(getDataFolder(), "levels.yml");
         this.levels = LevelConfig.load(levelsFile, getConfig().getConfigurationSection("guild.levels"));
@@ -73,6 +106,16 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
             shopService.reload(loadedShopConfig);
         }
         getLogger().info("FreeCoreGuild configurations, levels, and shop items reloaded successfully.");
+    }
+
+    private void applyCommandLanguage() {
+        for (String name : java.util.List.of("guild", "gc", "gshop")) {
+            PluginCommand command = getCommand(name);
+            if (command != null) {
+                command.setDescription(Lang.text("commands.metadata." + name + ".description"));
+                command.setUsage(Lang.text("commands.metadata." + name + ".usage"));
+            }
+        }
     }
 
     @Override
@@ -103,6 +146,7 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
         getServer().getMessenger().registerOutgoingPluginChannel(this, "BungeeCord");
 
         Lang.init(this);
+        applyCommandLanguage();
 
         File levelsFile = new File(getDataFolder(), "levels.yml");
         levels = LevelConfig.load(levelsFile, getConfig().getConfigurationSection("guild.levels"));
@@ -120,6 +164,12 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
         }
         service.initialize();
         getServer().getServicesManager().register(GuildProvider.class, service, this, ServicePriority.Normal);
+        if (getServer().getPluginManager().isPluginEnabled("PlaceholderAPI")) {
+            placeholderExpansion = new GuildPlaceholderExpansion(this, service);
+            if (!placeholderExpansion.register()) {
+                getLogger().warning("Failed to register %freecoreguild_name%.");
+            }
+        }
 
         economy = EconomyGateway.find(getServer(), service, getConfig().getDouble("guild.create-cost", 10000.0), getConfig().getDouble("guild.prosperity-per-coin", 1.0));
         if (economy == null) {
@@ -203,6 +253,7 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
                 if (service instanceof MySqlGuildService mysql) {
                     mysql.loadAllFromDatabase();
                 }
+                refreshGuildMenus();
             }
             case "SHOP_REFRESH" -> {
                 if (shopService != null) {
@@ -218,6 +269,7 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
                         org.bukkit.entity.Player online = org.bukkit.Bukkit.getPlayer(targetUuid);
                         if (online != null && online.isOnline()) {
                             online.sendMessage(notifyMsg);
+                            refreshInviteMenus(targetUuid);
                         }
                     } catch (Exception ignored) {}
                 }
@@ -225,8 +277,20 @@ public final class FreeCoreGuildPlugin extends JavaPlugin {
         }
     }
 
+    public Material getCheckinRewardMaterial(boolean isWeekend) {
+        String path = isWeekend ? "guild.checkin.weekend-reward-item.material" : "guild.checkin.base-reward-item.material";
+        String matName = getConfig().getString(path, "RAW_GOLD");
+        Material mat = Material.matchMaterial(matName);
+        return (mat != null && mat.isItem()) ? mat : Material.GOLD_ORE;
+    }
+
     @Override
     public void onDisable() {
+        if (placeholderExpansion != null) {
+            placeholderExpansion.unregister();
+            placeholderExpansion = null;
+        }
+        if (menus != null) menus.clearChatInputs();
         if (redisBridge != null) {
             redisBridge.shutdown();
             redisBridge = null;

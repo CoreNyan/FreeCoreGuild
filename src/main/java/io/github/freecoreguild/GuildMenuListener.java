@@ -22,6 +22,9 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
+import io.papermc.paper.event.player.AsyncChatEvent;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -42,11 +45,106 @@ public final class GuildMenuListener implements Listener {
     private final EconomyGateway economy;
     private final GuildBaseTransferService baseTransferService;
 
+    private static final long CONFIRM_TIMEOUT_NANOS = 60_000_000_000L;
+    private final Map<UUID, ConfirmationHolder> confirmations = new ConcurrentHashMap<>();
+    private final Map<UUID, ConfirmationHolder> pendingGuildNameInput = new ConcurrentHashMap<>();
+    private final Map<UUID, Object> inputSessions = new ConcurrentHashMap<>();
+
     private final Set<UUID> pendingDonateInput = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingApplyInput = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingCreateInput = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingTransferInput = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingInviteInput = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> pendingIconInput = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> inputInFlight = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Long> capturedInputs = new ConcurrentHashMap<>();
+    private final Set<Object> privateChatEvents = Collections.synchronizedSet(
+            Collections.newSetFromMap(new WeakHashMap<>()));
+
+    public boolean isChatInputPending(UUID player) {
+        return player != null && (hasPendingInput(player) || inputInFlight.contains(player));
+    }
+
+    public boolean isChatInputCaptured(UUID player) {
+        if (player == null) return false;
+        Long until = capturedInputs.get(player);
+        if (until == null) return false;
+        if (System.nanoTime() <= until) return true;
+        capturedInputs.remove(player, until);
+        return false;
+    }
+
+    public void clearChatInputs() {
+        confirmations.clear();
+        pendingGuildNameInput.clear();
+        inputSessions.clear();
+        pendingDonateInput.clear();
+        pendingApplyInput.clear();
+        pendingCreateInput.clear();
+        pendingTransferInput.clear();
+        pendingInviteInput.clear();
+        pendingIconInput.clear();
+        inputInFlight.clear();
+        capturedInputs.clear();
+        privateChatEvents.clear();
+    }
+
+    private boolean captureInput(Player player, Object event) {
+        UUID uuid = player.getUniqueId();
+        if (privateChatEvents.contains(event)) return true;
+        boolean pending = isChatInputPending(uuid);
+        if (!pending && !isChatInputCaptured(uuid)) return false;
+        privateChatEvents.add(event);
+        if (pending) capturedInputs.compute(uuid, (ignored, until) ->
+                until == null || System.nanoTime() > until ? System.nanoTime() + 1_000_000_000L : until);
+        return true;
+    }
+
+    private void queueInput(Player player, String message) {
+        UUID uuid = player.getUniqueId();
+        if (!hasPendingInput(uuid) || !inputInFlight.add(uuid)) return;
+        // Paper can bridge one message through both legacy and Adventure events.
+        // Keep the pending state until a single main-thread consumer handles it.
+        Object session = inputSessions.computeIfAbsent(uuid, ignored -> new Object());
+        Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
+            try {
+                if (player.isOnline() && inputSessions.get(uuid) == session) handleChatInput(player, message);
+            } finally {
+                if (inputSessions.get(uuid) == session) {
+                    inputInFlight.remove(uuid);
+                    if (!hasPendingInput(uuid)) inputSessions.remove(uuid, session);
+                }
+            }
+        });
+    }
+
+    @EventHandler
+    public void onInputPlayerQuit(org.bukkit.event.player.PlayerQuitEvent event) {
+        UUID uuid = event.getPlayer().getUniqueId();
+        clearPlayerInputs(uuid);
+        capturedInputs.remove(uuid);
+    }
+
+    @EventHandler
+    public void onConfirmationClose(org.bukkit.event.inventory.InventoryCloseEvent event) {
+        if (!(event.getInventory().getHolder() instanceof ConfirmationHolder holder)) return;
+        if (!event.getPlayer().getUniqueId().equals(holder.actor)) return;
+        if (confirmations.remove(holder.actor, holder)) inputSessions.remove(holder.actor);
+    }
+
+    private void clearPlayerInputs(UUID uuid) {
+        confirmations.remove(uuid);
+        pendingGuildNameInput.remove(uuid);
+        inputSessions.remove(uuid);
+        pendingDonateInput.remove(uuid);
+        pendingApplyInput.remove(uuid);
+        pendingCreateInput.remove(uuid);
+        pendingTransferInput.remove(uuid);
+        pendingInviteInput.remove(uuid);
+        pendingIconInput.remove(uuid);
+        inputInFlight.remove(uuid);
+        // Keep the short privacy grace window when a captured chat message opens a new request.
+    }
 
     public GuildMenuListener(GuildService service, ShopService shopService, EconomyGateway economy,
                              GuildBaseTransferService baseTransferService) {
@@ -56,7 +154,226 @@ public final class GuildMenuListener implements Listener {
         this.baseTransferService = baseTransferService;
     }
 
+    public void requestKickConfirmation(Player player, UUID target, String targetName) {
+        requestConfirmation(player, DestructiveAction.KICK, target, targetName);
+    }
+
+    public void requestLeaveConfirmation(Player player) {
+        requestConfirmation(player, DestructiveAction.LEAVE, null, null);
+    }
+
+    public void requestDisbandConfirmation(Player player) {
+        requestConfirmation(player, DestructiveAction.DISBAND, null, null);
+    }
+
+    public void requestTransferConfirmation(Player player, UUID target, String targetName) {
+        requestConfirmation(player, DestructiveAction.TRANSFER, target, targetName);
+    }
+
+    private void requestConfirmation(Player player, DestructiveAction action, UUID target, String targetName) {
+        UUID actor = player.getUniqueId();
+        clearPlayerInputs(actor);
+        player.closeInventory();
+        try {
+            GuildView guild = service.guildOf(actor).orElse(null);
+            if (guild == null) {
+                confirmationFailure(player);
+                return;
+            }
+            ConfirmationHolder holder = new ConfirmationHolder(action, actor, guild.owner(), guild.name(),
+                    guild.createdAt(), service.guildIdentity(actor), System.nanoTime(), target,
+                    targetName == null ? String.valueOf(target) : targetName);
+            if (!validateConfirmation(player, holder)) return;
+            String title = switch (action) {
+                case KICK -> Lang.text("menus.confirm.kick-title");
+                case LEAVE -> Lang.text("menus.confirm.leave-title");
+                case DISBAND -> Lang.text("menus.confirm.disband-title");
+                case TRANSFER -> Lang.text("menus.confirm.transfer-title");
+            };
+            Inventory inventory = Bukkit.createInventory(holder, 27, title);
+            fill(inventory);
+            put(inventory, 4, Material.PAPER, Lang.text("menus.confirm.guild", "name", guild.name()),
+                    List.of(Lang.text("menus.confirm.target", "target", target == null ? guild.name() : holder.targetName),
+                            Lang.text("menus.confirm.timeout")));
+            put(inventory, 11, Material.BARRIER, Lang.text("menus.confirm.cancel"), List.of());
+            put(inventory, 15, Material.RED_CONCRETE, Lang.text("menus.confirm.confirm"),
+                    List.of(action == DestructiveAction.KICK
+                            ? Lang.text("menus.confirm.kick-warning")
+                            : Lang.text("menus.confirm.name-warning")));
+            confirmations.put(actor, holder);
+            inputSessions.put(actor, new Object());
+            player.openInventory(inventory);
+            Bukkit.getScheduler().runTaskLater(FreeCoreGuildPlugin.getInstance(), () -> {
+                // Release abandoned state, but do not touch any newer request/input session.
+                boolean removed = confirmations.remove(actor, holder);
+                removed |= pendingGuildNameInput.remove(actor, holder);
+                if (removed) {
+                    inputSessions.remove(actor);
+                    inputInFlight.remove(actor);
+                    if (player.isOnline()) player.sendMessage(Lang.getPrefix()
+                            + Lang.text("menus.confirm.expired"));
+                }
+            }, 1200L);
+        } catch (RuntimeException ex) {
+            confirmationFailure(player);
+        }
+    }
+
+    private void confirmationFailure(Player player) {
+        playFail(player);
+        player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.invalid"));
+    }
+
+    private boolean validateConfirmation(Player player, ConfirmationHolder holder) {
+        UUID actor = player.getUniqueId();
+        GuildView current = service.guildOf(actor).orElse(null);
+        boolean valid = player.hasPermission("freecoreguild.use")
+                && actor.equals(holder.actor) && System.nanoTime() - holder.createdAt < CONFIRM_TIMEOUT_NANOS
+                && current != null && holder.guildName.equals(current.name())
+                && Objects.equals(holder.owner, current.owner()) && holder.guildCreatedAt == current.createdAt()
+                && holder.guildIdentity != 0L && holder.guildIdentity == service.guildIdentity(actor);
+        Role role = service.roleOf(actor).orElse(null);
+        if (valid) {
+            valid = switch (holder.action) {
+                case LEAVE -> role != null && role != Role.PRESIDENT && !actor.equals(current.owner());
+                case DISBAND, TRANSFER -> role == Role.PRESIDENT && actor.equals(current.owner());
+                case KICK -> role != null;
+            };
+        }
+        if (valid && (holder.action == DestructiveAction.KICK || holder.action == DestructiveAction.TRANSFER)) {
+            GuildView targetGuild = holder.target == null ? null : service.guildOf(holder.target).orElse(null);
+            MemberInfo target = service.getMembers(actor).stream()
+                    .filter(member -> member.uuid().equals(holder.target)).findFirst().orElse(null);
+            valid = !actor.equals(holder.target) && targetGuild != null && target != null
+                    && holder.guildName.equals(targetGuild.name()) && Objects.equals(holder.owner, targetGuild.owner())
+                    && holder.targetName.equals(target.name());
+            if (valid && holder.action == DestructiveAction.KICK) {
+                valid = !holder.target.equals(holder.owner) && role.ordinal() > target.role().ordinal();
+            }
+        }
+        if (!valid) confirmationFailure(player);
+        return valid;
+    }
+
+    private void handleConfirmationClick(Player player, int slot, ConfirmationHolder holder) {
+        if (!player.getUniqueId().equals(holder.actor)) return;
+        if (slot != 11 && slot != 15) return;
+        // Identity removal consumes this exact menu once, including a queued double click.
+        if (!confirmations.remove(holder.actor, holder)) return;
+        player.closeInventory();
+        if (slot == 11) {
+            inputSessions.remove(holder.actor);
+            player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.cancelled"));
+            return;
+        }
+        inputSessions.remove(holder.actor);
+        try {
+            if (!validateConfirmation(player, holder)) return;
+            if (holder.action == DestructiveAction.KICK) {
+                executeConfirmedAction(player, holder);
+            } else {
+                ConfirmationHolder nameInput = holder.withCreatedAt(System.nanoTime());
+                pendingGuildNameInput.put(holder.actor, nameInput);
+                Object session = new Object();
+                inputSessions.put(holder.actor, session);
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.name-prompt", "name", holder.guildName));
+                Bukkit.getScheduler().runTaskLater(FreeCoreGuildPlugin.getInstance(), () -> {
+                    if (pendingGuildNameInput.remove(holder.actor, nameInput)) {
+                        boolean sessionRemoved = inputSessions.remove(holder.actor, session);
+                        if (sessionRemoved) {
+                            inputInFlight.remove(holder.actor);
+                            if (player.isOnline()) player.sendMessage(Lang.getPrefix()
+                                    + Lang.text("menus.confirm.expired"));
+                        }
+                    }
+                }, 1200L);
+            }
+        } catch (RuntimeException ex) {
+            confirmationFailure(player);
+        }
+    }
+
+    private void executeConfirmedAction(Player player, ConfirmationHolder holder) {
+        if (!validateConfirmation(player, holder)) return;
+        FreeCoreGuildPlugin plugin = FreeCoreGuildPlugin.getInstance();
+        boolean success;
+        switch (holder.action) {
+            case KICK -> {
+                success = service.kick(holder.actor, holder.target);
+                if (success) {
+                    player.sendMessage(Lang.msg("kicked", "player", holder.targetName));
+                    plugin.broadcastGuildCross(holder.guildName, Lang.text("broadcast.kick", "player", holder.targetName));
+                } else player.sendMessage(Lang.msg("kick-failed"));
+            }
+            case LEAVE -> {
+                success = service.leave(holder.actor);
+                if (success) {
+                    player.sendMessage(Lang.msg("left"));
+                    plugin.broadcastGuildCross(holder.guildName, Lang.text("broadcast.leave", "player", player.getName()));
+                } else player.sendMessage(Lang.msg("leave-failed"));
+            }
+            case DISBAND -> {
+                Set<UUID> recipients = new HashSet<>();
+                for (MemberInfo member : service.getMembers(holder.actor)) recipients.add(member.uuid());
+                success = service.disband(holder.actor, holder.guildIdentity);
+                if (success) {
+                    player.sendMessage(Lang.msg("disbanded"));
+                    String notice = Lang.text("broadcast.disband");
+                    recipients.remove(holder.actor);
+                    // Membership has already been deleted; address the captured members directly.
+                    for (UUID recipient : recipients) {
+                        Player online = Bukkit.getPlayer(recipient);
+                        if (online != null && online.isOnline()) online.sendMessage(notice);
+                        else if (plugin.getRedisBridge() != null) {
+                            plugin.getRedisBridge().publish("NOTIFY_PLAYER|" + recipient + "||" + notice);
+                        }
+                    }
+                } else player.sendMessage(Lang.msg("disband-save-failed"));
+            }
+            case TRANSFER -> {
+                TransferResult result = service.transferWithReason(holder.actor, holder.target);
+                success = result.success();
+                if (success) {
+                    player.sendMessage(Lang.msg("transfer-success", "player", holder.targetName));
+                    plugin.broadcastGuildCross(holder.guildName, Lang.text("broadcast.transfer", "player", holder.targetName));
+                } else player.sendMessage(Lang.msg("transfer-failed", "reason", result.reason()));
+            }
+            default -> throw new IllegalStateException("Unknown confirmation action");
+        }
+        if (success) {
+            playSuccess(player);
+            plugin.refreshGuildMenus();
+            GuildRedisBridge bridge = plugin.getRedisBridge();
+            if (bridge != null) bridge.publish("SYNC_ALL|||");
+            if (holder.action == DestructiveAction.KICK) openMembersMenu(player);
+            else if (holder.action == DestructiveAction.TRANSFER) openMain(player);
+        } else playFail(player);
+    }
+
+    /** Rebuild only currently visible membership/invite menus after committed changes. */
+    public void refreshOpenMenus(UUID inviteTarget) {
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            if (inviteTarget != null && !inviteTarget.equals(online.getUniqueId())) continue;
+            if (!(online.getOpenInventory().getTopInventory().getHolder() instanceof MenuHolder holder)) continue;
+            switch (holder.type) {
+                case MY_INVITES -> openInvitesMenu(online);
+                case ALL_GUILDS -> openAllGuildsList(online);
+                case MEMBERS, MEMBER_DETAIL -> {
+                    if (inviteTarget == null) openMembersMenu(online);
+                }
+                case MAIN -> { if (inviteTarget == null) openMain(online); }
+                case DONATE -> { if (inviteTarget == null) openDonateMenu(online); }
+                case MANAGE -> { if (inviteTarget == null) openManageMenu(online); }
+                default -> { }
+            }
+        }
+    }
+
     public void openMain(Player player) {
+        if (!player.hasPermission("freecoreguild.use")) {
+            player.sendMessage(Lang.getPrefix() + Lang.text("menus.errors.no-use-permission"));
+            return;
+        }
         Optional<GuildView> opt = service.guildOf(player.getUniqueId());
         if (opt.isEmpty()) {
             openNoGuildMenu(player);
@@ -106,22 +423,7 @@ public final class GuildMenuListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-        GuildRedisBridge bridge = FreeCoreGuildPlugin.getInstance().getRedisBridge();
-        if (bridge != null) {
-            Bukkit.getScheduler().runTaskLaterAsynchronously(FreeCoreGuildPlugin.getInstance(), () -> {
-                List<String> offline = bridge.pollOfflineNotifications(player.getUniqueId());
-                if (!offline.isEmpty()) {
-                    Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
-                        if (player.isOnline()) {
-                            for (String msg : offline) {
-                                player.sendMessage(msg);
-                            }
-                        }
-                    });
-                }
-            }, 20L);
-        }
+        // 已完全移入 MySQL 实时拉取邀请与信息，不再利用跨服离线通知列表重复刷屏提醒
     }
 
     /* ══════════════════════════════════════════════════════════════ */
@@ -130,28 +432,27 @@ public final class GuildMenuListener implements Listener {
     public void openNoGuildMenu(Player player) {
         playClick(player);
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.NO_GUILD), 27,
-                Lang.raw("menus.no-guild.title", "&3加入或创建公会"));
+                Lang.text("menus.no-guild.title"));
         fill(inv);
 
         long cd = service.getLeaveCooldownRemainingMillis(player.getUniqueId());
         long hours = (cd / 3600_000L) + 1;
         String cdText = cd > 0
-                ? Lang.raw("menus.no-guild.cooldown-tip", "&c[当前退会冷却中，剩余约 {hours} 小时]", "hours", String.valueOf(hours))
-                : Lang.raw("menus.no-guild.normal-tip", "&7点击后在聊天栏直接输入你要创建的公会名称");
+                ? Lang.text("menus.no-guild.cooldown-tip", "hours", String.valueOf(hours))
+                : Lang.text("menus.no-guild.normal-tip");
 
         put(inv, 11, Material.COMPASS,
-                Lang.raw("menus.no-guild.join-title", "&a&l【加入公会】"),
-                Lang.list("menus.no-guild.join-lore", List.of("&7点击浏览全服所有公会列表", "&7也可在列表中点击直接提交入会申请")));
+                Lang.text("menus.no-guild.join-title"),
+                Lang.lines("menus.no-guild.join-lore"));
 
         double cost = economy != null ? economy.createCost() : 10000.0;
         put(inv, 15, Material.ANVIL,
-                Lang.raw("menus.no-guild.create-title", "&e&l【创建公会】"),
-                Lang.list("menus.no-guild.create-lore", List.of("&7花费 &e{cost} H币 &7创建全新的公会", "{cooldown}", "&8(输入的内容已被系统保护，不会发送至公屏)"),
-                        "cost", String.valueOf((long)cost), "cooldown", cdText));
+                Lang.text("menus.no-guild.create-title"),
+                Lang.lines("menus.no-guild.create-lore", "cost", String.valueOf((long)cost), "cooldown", cdText));
 
         put(inv, 22, Material.BARRIER,
-                Lang.raw("menus.common.close", "&c&l关闭界面"),
-                Lang.list("menus.common.close-lore", List.of("&7点击关闭菜单")));
+                Lang.text("menus.common.close"),
+                Lang.lines("menus.common.close-lore"));
         player.openInventory(inv);
     }
 
@@ -161,88 +462,68 @@ public final class GuildMenuListener implements Listener {
     public void openGuildMainMenu(Player player, GuildView g) {
         playClick(player);
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.MAIN), 36,
-                Lang.raw("menus.main.title", "&3公会面板 - {name}", "name", g.name()));
+                Lang.text("menus.main.title", "name", g.name()));
         fill(inv);
 
         Role role = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
 
         ItemStack infoItem = new ItemStack(Material.BEACON);
         ItemMeta meta = infoItem.getItemMeta();
-        meta.setDisplayName(Lang.raw("menus.main.info-title", "&b&l【{name}】 &eLv.{level}", "name", g.name(), "level", String.valueOf(g.level())));
-        meta.setLore(Lang.list("menus.main.info-lore", List.of(
-                "&7-----------------------------",
-                "&f公会等级: &eLv.{level}",
-                "&f当前繁荣度: &e{xp} &7(达标后由系统自动升级)",
-                "&f成员数量: &e{members} &7/ &f{max}",
-                "&f我的职位: {role}",
-                "&f假人配额: &e{fake_current} &7/ &f{fake_max}",
-                "&7-----------------------------"
-        ), "name", g.name(), "level", String.valueOf(g.level()), "xp", String.valueOf(g.xp()),
-                "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers()),
-                "role", role.getMenuDisplay(),
-                "fake_current", String.valueOf(service.currentFakePlayers(player.getUniqueId())),
-                "fake_max", String.valueOf(service.fakePlayerQuota(player.getUniqueId()))));
+        meta.setDisplayName(Lang.text("menus.main.info-title", "name", g.name(), "level", String.valueOf(g.level())));
+        long nextProsperity = FreeCoreGuildPlugin.getInstance().getNextLevelProsperity(g.level());
+        String nextProsperityText = nextProsperity < 0 ? Lang.text("menus.common.max-level") : FreeCoreGuildPlugin.getInstance().formatProsperity(nextProsperity);
+        meta.setLore(Lang.lines("menus.main.info-lore", "name", g.name(), "level", String.valueOf(g.level()), "xp", FreeCoreGuildPlugin.getInstance().formatProsperity(g.xp()), "next_xp", nextProsperityText, "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers()), "role", role.getMenuDisplay(), "fake_current", String.valueOf(service.currentFakePlayers(player.getUniqueId())), "fake_max", String.valueOf(service.fakePlayerQuota(player.getUniqueId()))));
         infoItem.setItemMeta(meta);
         inv.setItem(4, infoItem);
 
-        put(inv, 10, Material.GOLD_INGOT,
-                Lang.raw("menus.main.checkin-title", "&a&l每日签到"),
-                Lang.list("menus.main.checkin-lore", List.of(
-                        "&7每日签到可领取矿石奖励",
-                        "&7并为公会增加巨额繁荣度！",
-                        "&8(周末签到可获得三倍繁荣度奖励)"
-                )));
+        boolean checkedIn = service.hasCheckedInToday(player.getUniqueId());
+        String checkinStatus = checkedIn
+                ? Lang.text("menus.main.checkin-status-done")
+                : Lang.text("menus.main.checkin-status-ready");
+        Material checkinMat = checkedIn ? Material.MINECART : Material.GOLD_INGOT;
+
+        put(inv, 10, checkinMat,
+                Lang.text("menus.main.checkin-title"),
+                Lang.lines("menus.main.checkin-lore", "checkin_status", checkinStatus));
 
         put(inv, 12, Material.SUNFLOWER,
-                Lang.raw("menus.main.donate-title", "&6&lH币捐献"),
-                Lang.list("menus.main.donate-lore", List.of(
-                        "&7为公会添砖加瓦，提升繁荣度",
-                        "&a汇率: 1 H币 = 1 繁荣度",
-                        "&7公会升级将解锁更多假人配额与商城！"
-                )));
+                Lang.text("menus.main.donate-title"),
+                Lang.lines("menus.main.donate-lore"));
 
         put(inv, 14, Material.CHEST,
-                Lang.raw("menus.main.shop-title", "&d&l公会商城"),
-                Lang.list("menus.main.shop-lore", List.of(
-                        "&7浏览并购买公会专属商品",
-                        "&7职位越高可享受更低折扣与专属配额！"
-                )));
+                Lang.text("menus.main.shop-title"),
+                Lang.lines("menus.main.shop-lore"));
 
         String actionTip = role.canOperateFakePlayers()
-                ? Lang.raw("menus.main.base-lore-admin", "&e[会长/副会长] 点击打开传送或设置菜单")
-                : Lang.raw("menus.main.base-lore-member", "&a[普通成员] 点击直接传送到公会基地");
+                ? Lang.text("menus.main.base-lore-admin")
+                : Lang.text("menus.main.base-lore-member");
 
         put(inv, 16, Material.LODESTONE,
-                Lang.raw("menus.main.base-title", "&b&l公会基地"),
-                Lang.list("menus.main.base-lore-desc", List.of(
-                        "&7传送至公会设立的专属基地",
-                        "{action}",
-                        "&7支持全服无缝跨服传送！"
-                ), "action", actionTip));
+                Lang.text("menus.main.base-title"),
+                Lang.lines("menus.main.base-lore-desc", "action", actionTip));
 
         // 修复3: 菜单【成员管理】头颅显示为会长头颅(多个会长随机一个)
         ItemStack memberHead = new ItemStack(Material.PLAYER_HEAD);
         SkullMeta msm = (SkullMeta) memberHead.getItemMeta();
         UUID presUuid = getRandomPresidentUuid(player, g);
         applyPlayerSkull(msm, presUuid, null);
-        msm.setDisplayName(Lang.raw("menus.main.members-title", "&b&l成员管理"));
-        msm.setLore(Lang.list("menus.main.members-lore", List.of(
-                "&7查看全体成员、职位与贡献",
-                "&7管理成员晋升、踢人与入会申请审批"
-        )));
+        msm.setDisplayName(Lang.text("menus.main.members-title"));
+        msm.setLore(Lang.lines("menus.main.members-lore"));
         memberHead.setItemMeta(msm);
         inv.setItem(20, memberHead);
 
+        // 需求5: 在已加入公会的公会菜单新增按钮：全服公会列表（居中放置在 22 号槽位）
+        put(inv, 22, Material.BOOK,
+                Lang.text("menus.main.list-title"),
+                Lang.lines("menus.main.list-lore"));
+
         put(inv, 24, Material.NETHER_STAR,
-                Lang.raw("menus.main.manage-title", "&c&l公会管理"),
-                Lang.list("menus.main.manage-lore", List.of(
-                        "&7会长领取等级升级奖励",
-                        "&7公会转让、退出公会或解散公会"
-                )));
+                Lang.text("menus.main.manage-title"),
+                Lang.lines("menus.main.manage-lore"));
 
         put(inv, 31, Material.BARRIER,
-                Lang.raw("menus.common.close", "&c&l关闭界面"),
-                Lang.list("menus.common.close-lore", List.of("&7点击关闭菜单")));
+                Lang.text("menus.common.close"),
+                Lang.lines("menus.common.close-lore"));
         player.openInventory(inv);
     }
 
@@ -252,29 +533,28 @@ public final class GuildMenuListener implements Listener {
     public void openBaseManageMenu(Player player) {
         playClick(player);
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.BASE_MANAGE), 27,
-                Lang.raw("menus.base-manage.title", "&3公会基地管理"));
+                Lang.text("menus.base-manage.title"));
         fill(inv);
 
         var opt = service.getBaseLocation(player.getUniqueId());
-        String status = opt.map(b -> Lang.raw("menus.base-manage.status-set", "&a已设置: {server} ({x},{y},{z})",
-                "server", b.server(), "x", String.valueOf((int)b.x()), "y", String.valueOf((int)b.y()), "z", String.valueOf((int)b.z())))
-                .orElse(Lang.raw("menus.base-manage.status-unset", "&c当前尚未设置公会基地"));
+        String status = opt.map(b -> Lang.text("menus.base-manage.status-set", "server", b.server(), "x", String.valueOf((int)b.x()), "y", String.valueOf((int)b.y()), "z", String.valueOf((int)b.z())))
+                .orElse(Lang.text("menus.base-manage.status-unset"));
 
         put(inv, 4, Material.COMPASS,
-                Lang.raw("menus.base-manage.status-title", "&b&l公会基地状态"),
-                List.of("§7-----------------------------", status, "§7-----------------------------"));
+                Lang.text("menus.base-manage.status-title"),
+                Lang.lines("menus.base-manage.status-lore", "status", status));
 
         put(inv, 11, Material.ENDER_PEARL,
-                Lang.raw("menus.base-manage.teleport-title", "&a&l【传送到公会基地】"),
-                Lang.list("menus.base-manage.teleport-lore", List.of("&7立即传送到公会基地", "&7支持跨服自动传送定位！")));
+                Lang.text("menus.base-manage.teleport-title"),
+                Lang.lines("menus.base-manage.teleport-lore"));
 
         put(inv, 15, Material.LODESTONE,
-                Lang.raw("menus.base-manage.set-title", "&e&l【设置当前位置为基地】"),
-                Lang.list("menus.base-manage.set-lore", List.of("&7将你脚下的当前位置保存为公会基地", "&6所有公会成员均可跨服传送至此！")));
+                Lang.text("menus.base-manage.set-title"),
+                Lang.lines("menus.base-manage.set-lore"));
 
         put(inv, 22, Material.ARROW,
-                Lang.raw("menus.common.back-main", "&7返回主菜单"),
-                Lang.list("menus.common.back-main-lore", List.of("&7返回公会主面板")));
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.common.back-main-lore"));
         player.openInventory(inv);
     }
 
@@ -288,19 +568,14 @@ public final class GuildMenuListener implements Listener {
         playClick(player);
 
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.DONATE), 27,
-                Lang.raw("menus.donate.title", "&3H币捐献 - {name}", "name", g.name()));
+                Lang.text("menus.donate.title", "name", g.name()));
         fill(inv);
 
         double balance = economy != null ? economy.getBalance(player) : 0.0;
 
         put(inv, 4, Material.SUNFLOWER,
-                Lang.raw("menus.donate.info-title", "&6&l公会繁荣度捐献"),
-                Lang.list("menus.donate.info-lore", List.of(
-                        "&7当前公会繁荣度: &e{xp}",
-                        "&7你的H币余额: &e{balance} H币",
-                        "&a汇率: 1 H币 = 1 繁荣度",
-                        "&e繁荣度达标后将由系统自动触发公会升级！"
-                ), "xp", String.valueOf(g.xp()), "balance", String.valueOf((long)balance)));
+                Lang.text("menus.donate.info-title"),
+                Lang.lines("menus.donate.info-lore", "xp", String.valueOf(g.xp()), "balance", String.valueOf((long)balance)));
 
         int[] amounts = {1000, 5000, 10000, 50000};
         Material[] mats = {Material.IRON_INGOT, Material.GOLD_INGOT, Material.DIAMOND, Material.EMERALD};
@@ -309,21 +584,21 @@ public final class GuildMenuListener implements Listener {
         for (int i = 0; i < 4; i++) {
             int amt = amounts[i];
             put(inv, slots[i], mats[i],
-                    Lang.raw("menus.donate.donate-btn", "&f捐献 &e{amount} H币", "amount", String.format("%,d", amt)),
-                    Lang.list("menus.donate.donate-btn-lore", List.of("&7点击直接扣除 {amount} H币，增加 {amount} 繁荣度"), "amount", String.format("%,d", amt)));
+                    Lang.text("menus.donate.donate-btn", "amount", String.format(Lang.text("menus.donate.amount-format"), amt)),
+                    Lang.lines("menus.donate.donate-btn-lore", "amount", String.format(Lang.text("menus.donate.amount-format"), amt)));
         }
 
         put(inv, 22, Material.NAME_TAG,
-                Lang.raw("menus.donate.custom-title", "&d&l【自定义数量捐献】"),
-                Lang.list("menus.donate.custom-lore", List.of("&7点击后在聊天栏直接输入要捐献的H币数量", "&8(输入的内容已被系统拦截，不会在公屏出现)")));
+                Lang.text("menus.donate.custom-title"),
+                Lang.lines("menus.donate.custom-lore"));
 
         put(inv, 18, Material.ARROW,
-                Lang.raw("menus.common.back-main", "&7返回主菜单"),
-                Lang.list("menus.common.back-main-lore", List.of("&7返回公会主面板")));
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.common.back-main-lore"));
 
         put(inv, 26, Material.BARRIER,
-                Lang.raw("menus.common.close", "&c&l关闭界面"),
-                Lang.list("menus.common.close-lore", List.of("&7点击关闭菜单")));
+                Lang.text("menus.common.close"),
+                Lang.lines("menus.common.close-lore"));
         player.openInventory(inv);
     }
 
@@ -337,7 +612,7 @@ public final class GuildMenuListener implements Listener {
         playClick(player);
 
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.MEMBERS), 54,
-                Lang.raw("menus.members.title", "&3成员管理 - {name}", "name", g.name()));
+                Lang.text("menus.members.title", "name", g.name()));
         fill(inv);
 
         Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
@@ -346,20 +621,13 @@ public final class GuildMenuListener implements Listener {
         if (myRole.ordinal() >= Role.ELDER.ordinal()) {
             int appCount = service.applications(player.getUniqueId()).size();
             put(inv, 4, Material.WRITABLE_BOOK,
-                    Lang.raw("menus.members.apps-btn", "&e&l【入会申请审核】"),
-                    Lang.list("menus.members.apps-btn-lore", List.of(
-                            "&7当前待审核申请数: &e{count}",
-                            "&7点击打开申请列表进行同意或拒绝"
-                    ), "count", String.valueOf(appCount)));
+                    Lang.text("menus.members.apps-btn"),
+                    Lang.lines("menus.members.apps-btn-lore", "count", String.valueOf(appCount)));
 
             // 需求8: 邀请成员按钮
             put(inv, 6, Material.PAPER,
-                    "§a§l【邀请新成员】",
-                    List.of(
-                            "§7允许长老及以上职级邀请玩家加入公会",
-                            "§a点击后在聊天栏直接输入被邀请玩家名称",
-                            "§7也可使用指令: §e/guild invite <玩家名>"
-                    ));
+                    Lang.text("menus.members.invite-title"),
+                    Lang.lines("menus.members.invite-lore"));
         }
 
         int slot = 9;
@@ -369,29 +637,23 @@ public final class GuildMenuListener implements Listener {
             SkullMeta sm = (SkullMeta) head.getItemMeta();
             // 修复4: 修复成员列表头颅皮肤，应显示各个成员自己的头颅皮肤
             applyPlayerSkull(sm, m.uuid(), m.name());
-            sm.setDisplayName(Lang.raw("menus.members.head-title", "{role} &f{name}", "role", m.role().getMenuDisplay(), "name", m.name()));
+            sm.setDisplayName(Lang.text("menus.members.head-title", "role", m.role().getMenuDisplay(), "name", m.name()));
 
-            List<String> lore = new ArrayList<>(Lang.list("menus.members.head-lore", List.of(
-                    "&7-----------------------------",
-                    "&f职位: {role}",
-                    "&f累计繁荣贡献: &e{contribution}",
-                    "&f最后签到: &7{last_checkin}",
-                    "&7-----------------------------"
-            ), "role", m.role().getMenuDisplay(), "contribution", String.valueOf(m.contribution()), "last_checkin", m.lastCheckin()));
+            List<String> lore = new ArrayList<>(Lang.lines("menus.members.head-lore", "role", m.role().getMenuDisplay(), "contribution", String.valueOf(m.contribution()), "last_checkin", m.lastCheckin()));
 
             if (!m.uuid().equals(player.getUniqueId())) {
                 if (myRole == Role.PRESIDENT) {
-                    lore.add(Lang.raw("menus.members.action-promote", "&a[左键点击] 晋升职位"));
-                    lore.add(Lang.raw("menus.members.action-demote", "&6[右键点击] 降低职位"));
-                    lore.add(Lang.raw("menus.members.action-kick", "&c[Shift+右键] 踢出公会"));
+                    lore.add(Lang.text("menus.members.action-promote"));
+                    lore.add(Lang.text("menus.members.action-demote"));
+                    lore.add(Lang.text("menus.members.action-kick"));
                 } else if (myRole == Role.VICE_PRESIDENT) {
                     if (m.role() == Role.MEMBER) {
-                        lore.add(Lang.raw("menus.members.action-promote", "&a[左键点击] 晋升职位"));
-                        lore.add(Lang.raw("menus.members.action-kick", "&c[Shift+右键] 踢出公会"));
+                        lore.add(Lang.text("menus.members.action-promote"));
+                        lore.add(Lang.text("menus.members.action-kick"));
                     } else if (m.role() == Role.ELDER) {
-                        lore.add(Lang.raw("menus.members.action-promote", "&a[左键点击] 晋升职位"));
-                        lore.add(Lang.raw("menus.members.action-demote", "&6[右键点击] 降低职位"));
-                        lore.add(Lang.raw("menus.members.action-kick", "&c[Shift+右键] 踢出公会"));
+                        lore.add(Lang.text("menus.members.action-promote"));
+                        lore.add(Lang.text("menus.members.action-demote"));
+                        lore.add(Lang.text("menus.members.action-kick"));
                     }
                 }
             }
@@ -401,8 +663,89 @@ public final class GuildMenuListener implements Listener {
         }
 
         put(inv, 49, Material.ARROW,
-                Lang.raw("menus.common.back-main", "&7返回主菜单"),
-                Lang.list("menus.common.back-main-lore", List.of("&7返回公会主面板")));
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.common.back-main-lore"));
+        player.openInventory(inv);
+    }
+
+    /* ══════════════════════════════════════════════════════════════ */
+    /*                   界面 5.5: 成员独立管理二级菜单              */
+    /* ══════════════════════════════════════════════════════════════ */
+    public void openMemberDetailMenu(Player player, MemberInfo target) {
+        Optional<GuildView> opt = service.guildOf(player.getUniqueId());
+        if (opt.isEmpty()) { openNoGuildMenu(player); return; }
+        GuildView g = opt.get();
+        playClick(player);
+
+        Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
+        Role targetRole = target.role();
+
+        Inventory inv = Bukkit.createInventory(new MemberDetailHolder(target), 27,
+                Lang.text("menus.member-detail.title", "name", target.name()));
+        fill(inv);
+
+        // 槽位 4: 成员信息展示头颅
+        ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+        SkullMeta sm = (SkullMeta) head.getItemMeta();
+        applyPlayerSkull(sm, target.uuid(), target.name());
+        sm.setDisplayName(Lang.text("menus.member-detail.info-title", "role", targetRole.getMenuDisplay(), "name", target.name()));
+        sm.setLore(Lang.lines("menus.member-detail.info-lore", "role", targetRole.getMenuDisplay(), "contribution", String.valueOf(target.contribution()), "last_checkin", target.lastCheckin()));
+        head.setItemMeta(sm);
+        inv.setItem(4, head);
+
+        // 判断是否可以升职
+        boolean canPromote = false;
+        Role nextRole = null;
+        if (myRole == Role.PRESIDENT) {
+            if (targetRole == Role.MEMBER) { canPromote = true; nextRole = Role.ELDER; }
+            else if (targetRole == Role.ELDER) { canPromote = true; nextRole = Role.VICE_PRESIDENT; }
+            else if (targetRole == Role.VICE_PRESIDENT) { canPromote = true; nextRole = Role.PRESIDENT; }
+        } else if (myRole == Role.VICE_PRESIDENT) {
+            if (targetRole == Role.MEMBER) { canPromote = true; nextRole = Role.ELDER; }
+            else if (targetRole == Role.ELDER) { canPromote = true; nextRole = Role.VICE_PRESIDENT; }
+        }
+
+        if (canPromote && nextRole != null) {
+            put(inv, 11, Material.EMERALD,
+                    Lang.text("menus.member-detail.promote-title"),
+                    Lang.lines("menus.member-detail.promote-lore", "next_role", nextRole.getMenuDisplay()));
+        }
+
+        // 判断是否可以降职
+        boolean canDemote = false;
+        Role prevRole = null;
+        if (myRole == Role.PRESIDENT) {
+            if (targetRole == Role.VICE_PRESIDENT) { canDemote = true; prevRole = Role.ELDER; }
+            else if (targetRole == Role.ELDER) { canDemote = true; prevRole = Role.MEMBER; }
+        } else if (myRole == Role.VICE_PRESIDENT) {
+            if (targetRole == Role.ELDER) { canDemote = true; prevRole = Role.MEMBER; }
+        }
+
+        if (canDemote && prevRole != null) {
+            put(inv, 13, Material.GOLD_INGOT,
+                    Lang.text("menus.member-detail.demote-title"),
+                    Lang.lines("menus.member-detail.demote-lore", "prev_role", prevRole.getMenuDisplay()));
+        }
+
+        // 判断是否可以踢出
+        boolean canKick = false;
+        if (myRole == Role.PRESIDENT && targetRole != Role.PRESIDENT) {
+            canKick = true;
+        } else if (myRole == Role.VICE_PRESIDENT && (targetRole == Role.MEMBER || targetRole == Role.ELDER)) {
+            canKick = true;
+        }
+
+        if (canKick) {
+            put(inv, 15, Material.BARRIER,
+                    Lang.text("menus.member-detail.kick-title"),
+                    Lang.lines("menus.member-detail.kick-lore"));
+        }
+
+        // 返回按钮
+        put(inv, 22, Material.ARROW,
+                Lang.text("menus.common.back-members"),
+                Lang.lines("menus.common.back-members-lore"));
+
         player.openInventory(inv);
     }
 
@@ -415,14 +758,16 @@ public final class GuildMenuListener implements Listener {
         GuildView g = opt.get();
         playClick(player);
 
-        Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.TRANSFER), 36,
-                Lang.raw("menus.transfer.title", "&3选择会长转让目标 - {name}", "name", g.name()));
+        List<MemberInfo> candidates = service.getMembers(player.getUniqueId()).stream()
+                .filter(member -> !member.uuid().equals(player.getUniqueId())).limit(16).toList();
+        Inventory inv = Bukkit.createInventory(new TransferMenuHolder(player.getUniqueId(), g, candidates), 36,
+                Lang.text("menus.transfer.title", "name", g.name()));
         fill(inv);
 
         List<MemberInfo> members = service.getMembers(player.getUniqueId());
 
         int slot = 10;
-        for (MemberInfo m : members) {
+        for (MemberInfo m : candidates) {
             // 修复5: 必须正确过滤掉自己，显示其它成员
             if (m.uuid().equals(player.getUniqueId())) continue;
             if (slot > 25) break;
@@ -431,29 +776,19 @@ public final class GuildMenuListener implements Listener {
             SkullMeta sm = (SkullMeta) head.getItemMeta();
             // 头颅显示该候选成员本身的皮肤
             applyPlayerSkull(sm, m.uuid(), m.name());
-            sm.setDisplayName(Lang.raw("menus.transfer.item-title", "&b{name} &7({role}&7)", "name", m.name(), "role", m.role().getMenuDisplay()));
-            sm.setLore(Lang.list("menus.transfer.item-lore", List.of(
-                    "&7-----------------------------",
-                    "&f当前职位: {role}",
-                    "&f累计贡献: &e{contribution}",
-                    "&7-----------------------------",
-                    "&a[点击将会长职位转让给TA]",
-                    "&c转让后你将自动变更为副会长！"
-            ), "role", m.role().getMenuDisplay(), "contribution", String.valueOf(m.contribution())));
+            sm.setDisplayName(Lang.text("menus.transfer.item-title", "name", m.name(), "role", m.role().getMenuDisplay()));
+            sm.setLore(Lang.lines("menus.transfer.item-lore", "role", m.role().getMenuDisplay(), "contribution", String.valueOf(m.contribution())));
             head.setItemMeta(sm);
             inv.setItem(slot++, head);
         }
 
         put(inv, 31, Material.NAME_TAG,
-                Lang.raw("menus.transfer.chat-title", "&e&l公屏输入玩家名称转让"),
-                Lang.list("menus.transfer.chat-lore", List.of(
-                        "&7点击后在聊天栏直接输入目标玩家名 (不区分大小写)",
-                        "&8(输入内容已拦截，不会发送到公屏)"
-                )));
+                Lang.text("menus.transfer.chat-title"),
+                Lang.lines("menus.transfer.chat-lore"));
 
         put(inv, 27, Material.ARROW,
-                Lang.raw("menus.common.back-manage", "&7返回公会管理"),
-                Lang.list("menus.common.back-manage-lore", List.of("&7返回公会管理菜单")));
+                Lang.text("menus.common.back-manage"),
+                Lang.lines("menus.common.back-manage-lore"));
         player.openInventory(inv);
     }
 
@@ -465,7 +800,7 @@ public final class GuildMenuListener implements Listener {
         Role role = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
 
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.SHOP), 36,
-                "§3公会商城 - " + role.getMenuDisplay());
+                Lang.text("shop-menu.title", "role", role.getMenuDisplay()));
         fill(inv);
 
         Collection<ShopItem> allItems = shopService.items();
@@ -477,9 +812,9 @@ public final class GuildMenuListener implements Listener {
                     : Optional.empty();
 
             Material mat = Material.CHEST;
-            String itemName = "§e" + item.id();
+            String itemName = Lang.text("shop-menu.default-item-name", "id", item.id());
             double price = 0;
-            String limitDesc = "§a不限购";
+            String limitDesc = Lang.text("shop-menu.limit-unlimited");
             boolean canBuyRole = offerOpt.isPresent();
 
             if (canBuyRole) {
@@ -495,7 +830,7 @@ public final class GuildMenuListener implements Listener {
 
                 var decision = shopService.checkLimit(player.getUniqueId(), item.id(), role, 1);
                 if (offer.limitType() != ShopItem.LimitType.UNLIMITED) {
-                    limitDesc = "§6" + offer.limitType() + " 限额: §e" + decision.remaining() + "/" + offer.limitAmount() + " (已购 " + decision.purchased() + ")";
+                    limitDesc = Lang.text("shop-menu.limit-format", "type", Lang.text("shop-menu.limit-types." + offer.limitType().name().toLowerCase(Locale.ROOT)), "remaining", String.valueOf(decision.remaining()), "limit", String.valueOf(offer.limitAmount()), "bought", String.valueOf(decision.purchased()));
                 }
             } else {
                 for (Role r : Role.values()) {
@@ -510,24 +845,20 @@ public final class GuildMenuListener implements Listener {
             ItemMeta im = is.getItemMeta();
             im.setDisplayName(itemName);
 
-            List<String> lore = new ArrayList<>();
-            lore.add("§7-----------------------------");
-            lore.add("§f价格: §e" + (long)price + " H币");
-            lore.add("§f限购状态: " + limitDesc);
-            lore.add("§7-----------------------------");
-            if (canBuyRole) {
-                lore.add("§a[点击直接购买 1 件]");
-            } else {
-                lore.add("§c[你当前的公会职位等级未解锁该商品]");
-            }
+            String actionText = canBuyRole
+                    ? Lang.text("shop-menu.action-can-buy")
+                    : Lang.text("shop-menu.action-no-perm");
+
+            List<String> lore = Lang.lines("shop-menu.item-lore", "price", String.valueOf((long)price), "limit", limitDesc, "action", actionText);
+
             im.setLore(lore);
             is.setItemMeta(im);
             inv.setItem(slot++, is);
         }
 
         put(inv, 31, Material.ARROW,
-                Lang.raw("menus.common.back-main", "&7返回主菜单"),
-                Lang.list("menus.common.back-main-lore", List.of("&7返回公会主面板")));
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.common.back-main-lore"));
         player.openInventory(inv);
     }
 
@@ -542,55 +873,48 @@ public final class GuildMenuListener implements Listener {
         playClick(player);
 
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.MANAGE), 36,
-                Lang.raw("menus.manage.title", "&3公会管理 - {name}", "name", g.name()));
+                Lang.text("menus.manage.title", "name", g.name()));
         fill(inv);
 
         if (role == Role.PRESIDENT) {
             boolean claimed = service.isRewardClaimed(player.getUniqueId(), g.level());
             Material mat = claimed ? Material.MINECART : Material.CHEST_MINECART;
             String status = claimed
-                    ? Lang.raw("menus.manage.reward-claimed", "&7(当前等级奖励已领取)")
-                    : Lang.raw("menus.manage.reward-can-claim", "&a(点击立即领取当前等级奖励)");
+                    ? Lang.text("menus.manage.reward-claimed")
+                    : Lang.text("menus.manage.reward-can-claim");
 
-            put(inv, 11, mat,
-                    Lang.raw("menus.manage.reward-title", "&6&l【领取升级奖励】"),
-                    Lang.list("menus.manage.reward-lore", List.of(
-                            "&7公会等级: &eLv.{level}",
-                            "{status}",
-                            "&7公会升级后由会长在此领取，每个等级仅限一次"
-                    ), "level", String.valueOf(g.level()), "status", status));
+            // 槽位 10: 领取升级奖励
+            put(inv, 10, mat,
+                    Lang.text("menus.manage.reward-title"),
+                    Lang.lines("menus.manage.reward-lore", "level", String.valueOf(g.level()), "status", status));
 
-            put(inv, 13, Material.ENCHANTED_BOOK,
-                    Lang.raw("menus.manage.transfer-title", "&b&l【转让公会】"),
-                    Lang.list("menus.manage.transfer-lore", List.of(
-                            "&7将公会所有权转让给指定成员",
-                            "&c转让完成后你将自动降职为副会长！",
-                            "&a点击打开成员转让选择面板"
-                    )));
+            // 槽位 12: 转让公会
+            put(inv, 12, Material.ENCHANTED_BOOK,
+                    Lang.text("menus.manage.transfer-title"),
+                    Lang.lines("menus.manage.transfer-lore"));
 
-            put(inv, 15, Material.TNT,
-                    Lang.raw("menus.manage.disband-title", "&c&l【解散公会】"),
-                    Lang.list("menus.manage.disband-lore", List.of(
-                            "&4永久解散公会，不可逆！",
-                            "&7清空所有公会成员与假人数据",
-                            "&c点击后立即解散公会"
-                    )));
+            // 槽位 14: 修改公会图标
+            put(inv, 14, Material.ITEM_FRAME,
+                    Lang.text("menus.manage.icon-title"),
+                    Lang.lines("menus.manage.icon-lore", "icon", g.icon() != null && !g.icon().isBlank() ? g.icon() : "WHITE_BANNER"));
+
+            // 槽位 16: 解散公会
+            put(inv, 16, Material.TNT,
+                    Lang.text("menus.manage.disband-title"),
+                    Lang.lines("menus.manage.disband-lore"));
         } else {
             put(inv, 13, Material.PAPER,
-                    Lang.raw("menus.manage.non-owner-title", "&7公会信息"),
-                    Lang.list("menus.manage.non-owner-lore", List.of("&7你的职位为: {role}&7，高级管理仅限会长。"), "role", role.getMenuDisplay()));
+                    Lang.text("menus.manage.non-owner-title"),
+                    Lang.lines("menus.manage.non-owner-lore", "role", role.getMenuDisplay()));
         }
 
-        put(inv, 29, Material.SPRUCE_DOOR,
-                Lang.raw("menus.manage.leave-title", "&c&l【退出公会】"),
-                Lang.list("menus.manage.leave-lore", List.of(
-                        "&7离开当前公会",
-                        "&c注意：退会后将进入冷却期，冷却期内无法加会或创会！"
-                )));
+        put(inv, 30, Material.SPRUCE_DOOR,
+                Lang.text("menus.manage.leave-title"),
+                Lang.lines("menus.manage.leave-lore"));
 
-        put(inv, 31, Material.ARROW,
-                Lang.raw("menus.common.back-main", "&7返回主菜单"),
-                Lang.list("menus.common.back-main-lore", List.of("&7返回公会主面板")));
+        put(inv, 32, Material.ARROW,
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.common.back-main-lore"));
         player.openInventory(inv);
     }
 
@@ -604,7 +928,7 @@ public final class GuildMenuListener implements Listener {
 
         List<UUID> apps = service.applications(player.getUniqueId());
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.APPLICATIONS), 36,
-                Lang.raw("menus.applications.title", "&3入会申请审核 ({count})", "count", String.valueOf(apps.size())));
+                Lang.text("menus.applications.title", "count", String.valueOf(apps.size())));
         fill(inv);
 
         int slot = 10;
@@ -617,20 +941,38 @@ public final class GuildMenuListener implements Listener {
             SkullMeta sm = (SkullMeta) head.getItemMeta();
             // 修复4: 修复申请列表头颅皮肤，应显示各个申请人自己的头颅
             applyPlayerSkull(sm, uid, name);
-            sm.setDisplayName(Lang.raw("menus.applications.item-title", "&e申请人: &f{name}", "name", name));
-            sm.setLore(Lang.list("menus.applications.item-lore", List.of(
-                    "&7UUID: {uuid}",
-                    "&a[左键点击] 同意加入",
-                    "&c[右键点击] 拒绝申请"
-            ), "uuid", uid.toString()));
+            sm.setDisplayName(Lang.text("menus.applications.item-title", "name", name));
+            sm.setLore(Lang.lines("menus.applications.item-lore", "uuid", uid.toString()));
             head.setItemMeta(sm);
             inv.setItem(slot++, head);
         }
 
         put(inv, 31, Material.ARROW,
-                Lang.raw("menus.common.back-members", "&7返回成员管理"),
-                Lang.list("menus.common.back-members-lore", List.of("&7返回成员管理菜单")));
+                Lang.text("menus.common.back-members"),
+                Lang.lines("menus.common.back-members-lore"));
         player.openInventory(inv);
+    }
+
+    public enum SortMode { NEWEST, PROSPERITY, NAME }
+    private final Map<UUID, SortMode> playerSortMode = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> playerSortAscending = new ConcurrentHashMap<>();
+
+    private List<GuildView> getSortedGuilds(UUID playerUuid) {
+        List<GuildView> list = new ArrayList<>(service.getAllGuilds());
+        SortMode mode = playerSortMode.getOrDefault(playerUuid, SortMode.NEWEST);
+        boolean asc = playerSortAscending.getOrDefault(playerUuid, false);
+
+        Comparator<GuildView> comp = switch (mode) {
+            case NEWEST -> Comparator.comparingLong(GuildView::createdAt);
+            case PROSPERITY -> Comparator.comparingLong(GuildView::xp);
+            case NAME -> Comparator.comparing(g -> g.name().toLowerCase(Locale.ROOT));
+        };
+
+        if (!asc) {
+            comp = comp.reversed();
+        }
+        list.sort(comp);
+        return list;
     }
 
     /* ══════════════════════════════════════════════════════════════ */
@@ -638,35 +980,150 @@ public final class GuildMenuListener implements Listener {
     /* ══════════════════════════════════════════════════════════════ */
     public void openAllGuildsList(Player player) {
         playClick(player);
-        List<GuildView> list = service.getAllGuilds();
+        List<GuildView> list = getSortedGuilds(player.getUniqueId());
         Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.ALL_GUILDS), 54,
-                Lang.raw("menus.all-guilds.title", "&3申请加入公会 ({count})", "count", String.valueOf(list.size())));
+                Lang.text("menus.all-guilds.title", "count", String.valueOf(list.size())));
         fill(inv);
 
         int slot = 0;
         for (GuildView g : list) {
             if (slot >= 45) break;
-            ItemStack banner = new ItemStack(Material.WHITE_BANNER);
+            Material mat = Material.WHITE_BANNER;
+            if (g.icon() != null && !g.icon().isBlank()) {
+                Material m = Material.matchMaterial(g.icon());
+                if (m != null && m.isItem()) {
+                    mat = m;
+                }
+            }
+            ItemStack banner = new ItemStack(mat);
             ItemMeta meta = banner.getItemMeta();
-            meta.setDisplayName(Lang.raw("menus.all-guilds.item-title", "&b{name} &7(Lv.{level})", "name", g.name(), "level", String.valueOf(g.level())));
-            meta.setLore(Lang.list("menus.all-guilds.item-lore", List.of(
-                    "&7-----------------------------",
-                    "&f公会等级: &eLv.{level}",
-                    "&f繁荣度: &e{xp}",
-                    "&f成员数量: &e{members} &7/ &f{max}",
-                    "&7-----------------------------",
-                    "&a[点击申请加入该公会]"
-            ), "level", String.valueOf(g.level()), "xp", String.valueOf(g.xp()), "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers())));
+            meta.setDisplayName(Lang.text("menus.all-guilds.item-title", "name", g.name(), "level", String.valueOf(g.level())));
+            String presStr = g.presidents() != null && !g.presidents().isEmpty()
+                    ? String.join(Lang.text("menus.common.president-separator"), g.presidents())
+                    : Lang.text("menus.common.none");
+            long nextProsperity = FreeCoreGuildPlugin.getInstance().getNextLevelProsperity(g.level());
+            String nextText = nextProsperity < 0 ? Lang.text("menus.common.max-level") : FreeCoreGuildPlugin.getInstance().formatProsperity(nextProsperity);
+            meta.setLore(Lang.lines("menus.all-guilds.item-lore", "presidents", presStr, "level", String.valueOf(g.level()), "xp", FreeCoreGuildPlugin.getInstance().formatProsperity(g.xp()), "next_xp", nextText, "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers())));
             banner.setItemMeta(meta);
             inv.setItem(slot++, banner);
         }
 
+        // 排序/筛选按钮 (45 号槽位)
+        SortMode mode = playerSortMode.getOrDefault(player.getUniqueId(), SortMode.NEWEST);
+        boolean asc = playerSortAscending.getOrDefault(player.getUniqueId(), false);
+        String modeName = switch (mode) {
+            case NEWEST -> Lang.text("menus.all-guilds.sort-mode-newest");
+            case PROSPERITY -> Lang.text("menus.all-guilds.sort-mode-prosperity");
+            case NAME -> Lang.text("menus.all-guilds.sort-mode-name");
+        };
+        String orderName = asc ? Lang.text("menus.all-guilds.sort-order-ascending") : Lang.text("menus.all-guilds.sort-order-descending");
+
+        put(inv, 45, Material.HOPPER,
+                Lang.text("menus.all-guilds.sort-btn"),
+                Lang.lines("menus.all-guilds.sort-lore", "mode", modeName, "order", orderName));
+
         put(inv, 49, Material.NAME_TAG,
-                Lang.raw("menus.all-guilds.chat-title", "&e&l聊天栏输入公会名申请"),
-                Lang.list("menus.all-guilds.chat-lore", List.of(
-                        "&7点击后在聊天栏输入公会名称直接申请",
-                        "&8(输入已受拦截保护)"
-                )));
+                Lang.text("menus.all-guilds.chat-title"),
+                Lang.lines("menus.all-guilds.chat-lore"));
+
+        // 需求10: 搜寻列表新增二级菜单入口：我的公会邀请列表 (放置在 53 号槽位)
+        List<GuildService.GuildInvite> pendingInvites = loadInvites(player);
+        int inviteCount = pendingInvites == null ? 0 : pendingInvites.size();
+        put(inv, 53, Material.WRITABLE_BOOK,
+                Lang.text("menus.all-guilds.my-invites-btn"),
+                Lang.lines("menus.all-guilds.my-invites-lore", "count", String.valueOf(inviteCount)));
+        player.openInventory(inv);
+    }
+
+    /* ══════════════════════════════════════════════════════════════ */
+    /*             界面 11: 全服公会独立纯预览列表（点击无操作）         */
+    /* ══════════════════════════════════════════════════════════════ */
+    private List<GuildService.GuildInvite> loadInvites(Player player) {
+        try {
+            return service.getInvitesFor(player.getUniqueId());
+        } catch (IllegalStateException ex) {
+            player.sendMessage(Lang.getPrefix() + Lang.text("menus.my-invites.load-failed"));
+            return null;
+        }
+    }
+
+    public void openInvitesMenu(Player player) {
+        List<GuildService.GuildInvite> invites = loadInvites(player);
+        if (invites == null) return;
+        playClick(player);
+        Inventory inv = Bukkit.createInventory(new InviteMenuHolder(invites), 36,
+                Lang.text("menus.my-invites.title", "count", String.valueOf(invites.size())));
+        fill(inv);
+
+        if (invites.isEmpty()) {
+            put(inv, 13, Material.BARRIER,
+                    Lang.text("menus.my-invites.empty-title"),
+                    Lang.lines("menus.my-invites.empty-lore"));
+        } else {
+            int slot = 10;
+            long now = System.currentTimeMillis();
+            for (GuildService.GuildInvite invite : invites) {
+                if (slot > 25) break;
+                long remainSec = Math.max(0L, (invite.expireAt() - now) / 1000L);
+                put(inv, slot++, Material.ENCHANTED_BOOK,
+                        Lang.text("menus.my-invites.item-title", "guild", invite.guildName()),
+                        Lang.lines("menus.my-invites.item-lore", "guild", invite.guildName(), "inviter", invite.inviterName(), "remain", String.valueOf(remainSec)));
+            }
+        }
+
+        put(inv, 31, Material.ARROW,
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.my-invites.back-lore"));
+        player.openInventory(inv);
+    }
+    /* ══════════════════════════════════════════════════════════════ */
+    public void openAllGuildsPreviewList(Player player) {
+        playClick(player);
+        List<GuildView> list = getSortedGuilds(player.getUniqueId());
+        Inventory inv = Bukkit.createInventory(new MenuHolder(MenuType.ALL_GUILDS_PREVIEW), 54,
+                Lang.text("menus.all-guilds-preview.title", "count", String.valueOf(list.size())));
+        fill(inv);
+
+        int slot = 0;
+        for (GuildView g : list) {
+            if (slot >= 45) break;
+            Material mat = Material.WHITE_BANNER;
+            if (g.icon() != null && !g.icon().isBlank()) {
+                Material m = Material.matchMaterial(g.icon());
+                if (m != null && m.isItem()) {
+                    mat = m;
+                }
+            }
+            ItemStack banner = new ItemStack(mat);
+            ItemMeta meta = banner.getItemMeta();
+            meta.setDisplayName(Lang.text("menus.all-guilds-preview.item-title", "name", g.name(), "level", String.valueOf(g.level())));
+            String presStr = g.presidents() != null && !g.presidents().isEmpty()
+                    ? String.join(Lang.text("menus.common.president-separator"), g.presidents())
+                    : Lang.text("menus.common.none");
+            long nextProsperity = FreeCoreGuildPlugin.getInstance().getNextLevelProsperity(g.level());
+            String nextText = nextProsperity < 0 ? Lang.text("menus.common.max-level") : FreeCoreGuildPlugin.getInstance().formatProsperity(nextProsperity);
+            meta.setLore(Lang.lines("menus.all-guilds-preview.item-lore", "presidents", presStr, "level", String.valueOf(g.level()), "xp", FreeCoreGuildPlugin.getInstance().formatProsperity(g.xp()), "next_xp", nextText, "members", String.valueOf(g.members()), "max", String.valueOf(g.maxMembers())));
+            banner.setItemMeta(meta);
+            inv.setItem(slot++, banner);
+        }
+
+        // 排序/筛选按钮 (45 号槽位)
+        SortMode mode = playerSortMode.getOrDefault(player.getUniqueId(), SortMode.NEWEST);
+        boolean asc = playerSortAscending.getOrDefault(player.getUniqueId(), false);
+        String modeName = switch (mode) {
+            case NEWEST -> Lang.text("menus.all-guilds.sort-mode-newest");
+            case PROSPERITY -> Lang.text("menus.all-guilds.sort-mode-prosperity");
+            case NAME -> Lang.text("menus.all-guilds.sort-mode-name");
+        };
+        String orderName = asc ? Lang.text("menus.all-guilds.sort-order-ascending") : Lang.text("menus.all-guilds.sort-order-descending");
+
+        put(inv, 45, Material.HOPPER,
+                Lang.text("menus.all-guilds-preview.sort-btn"),
+                Lang.lines("menus.all-guilds-preview.sort-lore", "mode", modeName, "order", orderName));
+
+        put(inv, 49, Material.ARROW,
+                Lang.text("menus.common.back-main"),
+                Lang.lines("menus.common.back-main-lore"));
         player.openInventory(inv);
     }
 
@@ -680,17 +1137,132 @@ public final class GuildMenuListener implements Listener {
         int slot = event.getRawSlot();
         if (slot < 0 || slot >= event.getInventory().getSize()) return;
 
+        if (holder instanceof ConfirmationHolder confirmation) {
+            if (event.getClick() != org.bukkit.event.inventory.ClickType.LEFT
+                    && event.getClick() != org.bukkit.event.inventory.ClickType.RIGHT) return;
+            handleConfirmationClick(player, slot, confirmation);
+            return;
+        }
+
+        if (holder instanceof MemberDetailHolder detailHolder) {
+            handleMemberDetailClick(player, slot, detailHolder.target);
+            return;
+        }
+
+        ItemStack clickedItem = event.getCurrentItem();
+        if (clickedItem == null || clickedItem.getType() == Material.AIR || clickedItem.getType() == Material.GRAY_STAINED_GLASS_PANE) {
+            // 点击的是菜单背景或空气，直接返回，不触发任何逻辑与任何提示（彻底杜绝隐形按钮）
+            return;
+        }
+
         switch (holder.type) {
             case NO_GUILD -> handleNoGuildClick(player, slot);
             case MAIN -> handleMainClick(player, slot);
             case BASE_MANAGE -> handleBaseManageClick(player, slot);
             case DONATE -> handleDonateClick(player, slot);
-            case MEMBERS -> handleMembersClick(player, slot, event.isLeftClick(), event.isRightClick(), event.isShiftClick());
-            case TRANSFER -> handleTransferClick(player, slot);
+            case MEMBERS -> handleMembersClick(player, slot);
+            case TRANSFER -> handleTransferClick(player, slot, holder);
             case SHOP -> handleShopClick(player, slot);
             case APPLICATIONS -> handleApplicationsClick(player, slot, event.isLeftClick(), event.isRightClick());
             case MANAGE -> handleManageClick(player, slot);
-            case ALL_GUILDS -> handleAllGuildsClick(player, slot);
+            case ALL_GUILDS -> handleAllGuildsClick(player, slot, event.isLeftClick(), event.isRightClick());
+            case ALL_GUILDS_PREVIEW -> handleAllGuildsPreviewClick(player, slot, event.isLeftClick(), event.isRightClick());
+            case MY_INVITES -> handleMyInvitesClick(player, slot, event.isLeftClick(), event.isRightClick(), holder);
+        }
+    }
+
+    private void handleAllGuildsPreviewClick(Player player, int slot, boolean left, boolean right) {
+        if (slot == 45) {
+            toggleSort(player, left, right);
+            openAllGuildsPreviewList(player);
+            return;
+        }
+        if (slot == 49) {
+            openMain(player);
+        }
+    }
+
+    private void toggleSort(Player player, boolean left, boolean right) {
+        UUID uid = player.getUniqueId();
+        if (left) {
+            SortMode cur = playerSortMode.getOrDefault(uid, SortMode.NEWEST);
+            SortMode next = switch (cur) {
+                case NEWEST -> SortMode.PROSPERITY;
+                case PROSPERITY -> SortMode.NAME;
+                case NAME -> SortMode.NEWEST;
+            };
+            playerSortMode.put(uid, next);
+            playClick(player);
+        } else if (right) {
+            boolean curAsc = playerSortAscending.getOrDefault(uid, false);
+            playerSortAscending.put(uid, !curAsc);
+            playClick(player);
+        }
+    }
+
+    private void handleMyInvitesClick(Player player, int slot, boolean left, boolean right, MenuHolder holder) {
+        if (slot == 31) {
+            openAllGuildsList(player);
+            return;
+        }
+
+        List<GuildService.GuildInvite> invites = holder instanceof InviteMenuHolder snapshot
+                ? snapshot.invites : List.of();
+        int idx = slot - 10;
+        if (slot <= 25 && idx >= 0 && idx < invites.size()) {
+            GuildService.GuildInvite inv = invites.get(idx);
+            try {
+                if (!service.hasInvite(player.getUniqueId(), inv.guildName())) {
+                    player.sendMessage(Lang.msg("invite-expired"));
+                    openInvitesMenu(player);
+                    return;
+                }
+            } catch (IllegalStateException ex) {
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.my-invites.load-failed"));
+                return;
+            }
+            if (left) {
+                // 接受邀请
+                long cd = service.getLeaveCooldownRemainingMillis(player.getUniqueId());
+                if (cd > 0) {
+                    long hours = (cd / 3600_000L) + 1;
+                    playFail(player);
+                    player.sendMessage(Lang.msg("cooldown-active", "hours", String.valueOf(hours)));
+                    return;
+                }
+                if (service.acceptInvite(player.getUniqueId(), inv.guildName())) {
+                    playSuccess(player);
+                    player.sendMessage(Lang.msg("invite-accepted", "guild", inv.guildName()));
+                    FreeCoreGuildPlugin.getInstance().broadcastGuildCross(inv.guildName(),
+                            Lang.text("broadcast.join", "player", player.getName()));
+                    FreeCoreGuildPlugin.getInstance().refreshGuildMenus();
+                    GuildRedisBridge bridge = FreeCoreGuildPlugin.getInstance().getRedisBridge();
+                    if (bridge != null) bridge.publish("SYNC_ALL|||");
+                    openMain(player);
+                } else {
+                    playFail(player);
+                    player.sendMessage(Lang.msg("app-approved-failed"));
+                    openInvitesMenu(player);
+                }
+            } else if (right) {
+                // Only acknowledge rejection after the shared invite was removed.
+                try {
+                    service.removeInvite(player.getUniqueId(), inv.guildName());
+                } catch (IllegalStateException ex) {
+                    playFail(player);
+                    player.sendMessage(Lang.getPrefix() + Lang.text("menus.my-invites.process-failed"));
+                    return;
+                }
+                playSuccess(player);
+                player.sendMessage(Lang.msg("invite-rejected", "guild", inv.guildName()));
+                openInvitesMenu(player);
+            }
+        }
+    }
+
+    private void handleAllGuildsPreviewClick(Player player, int slot) {
+        if (slot == 49) {
+            openMain(player);
         }
     }
 
@@ -714,25 +1286,45 @@ public final class GuildMenuListener implements Listener {
         }
     }
 
+    private final Set<UUID> checkinClickCooldown = ConcurrentHashMap.newKeySet();
+
     private void handleMainClick(Player player, int slot) {
         if (slot == 10) {
-            CheckinResult res = service.checkinPlayer(player.getUniqueId());
-            if (res.success()) {
-                if (res.goldAmount() > 0) {
-                    player.getInventory().addItem(new ItemStack(Material.RAW_GOLD, res.goldAmount()));
-                }
-                playSuccess(player);
-                player.sendMessage(Lang.msg("checked-in", "gold", String.valueOf(res.goldAmount()), "prosperity", String.valueOf(res.prosperity())));
-                // 需求7: gc公会频道广播每日签到
-                service.guildOf(player.getUniqueId()).ifPresent(g -> {
-                    FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
-                            "§8[§b公会§8] §e" + player.getName() + " §a完成了今日公会签到，公会增加 §e" + res.prosperity() + " §a点繁荣度！");
-                });
-            } else {
-                playFail(player);
-                player.sendMessage(Lang.msg("checkin-failed", "message", res.message()));
+            if (!checkinClickCooldown.add(player.getUniqueId())) {
+                return;
             }
-            openMain(player);
+            try {
+                int beforeLevel = service.guildOf(player.getUniqueId()).map(GuildView::level).orElse(0);
+                CheckinResult res = service.checkinPlayer(player.getUniqueId());
+                if (res.success()) {
+                    if (res.goldAmount() > 0) {
+                        java.time.DayOfWeek dow = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).getDayOfWeek();
+                        boolean isWeekend = (dow == java.time.DayOfWeek.SATURDAY || dow == java.time.DayOfWeek.SUNDAY);
+                        Material rewardMat = FreeCoreGuildPlugin.getInstance().getCheckinRewardMaterial(isWeekend);
+                        player.getInventory().addItem(new ItemStack(rewardMat, res.goldAmount()));
+                    }
+                    playSuccess(player);
+                    player.sendMessage(Lang.msg("checked-in", "gold", String.valueOf(res.goldAmount()), "prosperity", String.valueOf(res.prosperity())));
+                    // gc公会频道广播每日签到
+                    service.guildOf(player.getUniqueId()).ifPresent(g -> {
+                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                                Lang.text("broadcast.checkin", "player", player.getName(), "prosperity", String.valueOf(res.prosperity())));
+                        if (g.level() > beforeLevel) FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                                Lang.text("broadcast.upgrade", "level", String.valueOf(g.level())));
+                    });
+                    FreeCoreGuildPlugin.getInstance().refreshGuildMenus();
+                    GuildRedisBridge bridge = FreeCoreGuildPlugin.getInstance().getRedisBridge();
+                    if (bridge != null) bridge.publish("SYNC_ALL|||");
+                } else {
+                    playFail(player);
+                    player.sendMessage(Lang.msg("checkin-failed", "message", res.message()));
+                }
+                openMain(player);
+            } finally {
+                Bukkit.getScheduler().runTaskLater(FreeCoreGuildPlugin.getInstance(), () -> {
+                    checkinClickCooldown.remove(player.getUniqueId());
+                }, 20L); // 1秒点击防抖
+            }
         } else if (slot == 12) {
             openDonateMenu(player);
         } else if (slot == 14) {
@@ -746,6 +1338,9 @@ public final class GuildMenuListener implements Listener {
             }
         } else if (slot == 20) {
             openMembersMenu(player);
+        } else if (slot == 22) {
+            // 点击查看全服公会独立纯预览列表（点击无申请操作）
+            openAllGuildsPreviewList(player);
         } else if (slot == 24) {
             openManageMenu(player);
         } else if (slot == 31) {
@@ -761,6 +1356,8 @@ public final class GuildMenuListener implements Listener {
             if (service.setBaseLocation(player.getUniqueId(), player.getLocation())) {
                 playSuccess(player);
                 player.sendMessage(Lang.msg("base-set-success"));
+                service.guildOf(player.getUniqueId()).ifPresent(g -> FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                        Lang.text("broadcast.base", "player", player.getName())));
                 openBaseManageMenu(player);
             } else {
                 playFail(player);
@@ -793,24 +1390,28 @@ public final class GuildMenuListener implements Listener {
     private void executeDonate(Player player, double amount) {
         if (economy != null && economy.donate(player, amount)) {
             playSuccess(player);
-            player.sendMessage(Lang.msg("donated", "amount", String.valueOf((long)amount), "prosperity", String.valueOf((long)amount)));
-            // 需求7: gc公会频道广播捐献
-            service.guildOf(player.getUniqueId()).ifPresent(g -> {
-                FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
-                        "§8[§b公会§8] §e" + player.getName() + " §a向公会捐献了 §e" + (long)amount + " H币§a，繁荣度增加 §e" + (long)amount + "§a！");
-            });
+            player.sendMessage(Lang.msg("donated", "amount", String.valueOf((long) amount),
+                    "prosperity", String.valueOf(economy.prosperityFor(amount))));
         } else {
             playFail(player);
             player.sendMessage(Lang.msg("donate-failed"));
         }
     }
 
-    private void handleMembersClick(Player player, int slot, boolean left, boolean right, boolean shift) {
+    private void handleMembersClick(Player player, int slot) {
         if (slot == 49) { openMain(player); return; }
-        if (slot == 4) { openApplicationsMenu(player); return; }
+        Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
+        if (slot == 4) {
+            if (myRole.ordinal() < Role.ELDER.ordinal()) {
+                playFail(player);
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.applications.no-permission"));
+                return;
+            }
+            openApplicationsMenu(player);
+            return;
+        }
         if (slot == 6) {
             // 需求8: 邀请成员菜单点击
-            Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
             if (myRole.ordinal() < Role.ELDER.ordinal()) {
                 playFail(player);
                 player.sendMessage(Lang.msg("invite-no-permission"));
@@ -829,71 +1430,111 @@ public final class GuildMenuListener implements Listener {
             MemberInfo target = members.get(idx);
             if (target.uuid().equals(player.getUniqueId())) return;
 
-            Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
-
-            if (shift && right) {
-                if (service.kick(player.getUniqueId(), target.uuid())) {
-                    playSuccess(player);
-                    player.sendMessage(Lang.msg("kicked", "player", target.name()));
-                    // 需求7: gc广播被踢出
-                    service.guildOf(player.getUniqueId()).ifPresent(g -> {
-                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
-                                "§8[§b公会§8] §c成员 §e" + target.name() + " §c已被移出公会！");
-                    });
-                } else {
-                    playFail(player);
-                    player.sendMessage(Lang.msg("kick-failed"));
-                }
-                openMembersMenu(player);
-            } else if (left) {
-                if (service.promote(player.getUniqueId(), target.uuid())) {
-                    playSuccess(player);
-                    player.sendMessage(Lang.msg("promoted", "player", target.name()));
-                } else {
-                    playFail(player);
-                    player.sendMessage(Lang.msg("promote-failed"));
-                }
-                openMembersMenu(player);
-            } else if (right) {
-                if (service.demote(player.getUniqueId(), target.uuid())) {
-                    playSuccess(player);
-                    player.sendMessage(Lang.msg("demoted", "player", target.name()));
-                } else {
-                    playFail(player);
-                    player.sendMessage(Lang.msg("demote-failed"));
-                }
-                openMembersMenu(player);
-            }
+            // 需求12: 所有成员均可点击打开查看该成员的信息（管理按钮由权限判断是否可见）
+            openMemberDetailMenu(player, target);
         }
     }
 
-    private void handleTransferClick(Player player, int slot) {
-        if (slot == 27) { openManageMenu(player); return; }
-        if (slot == 31) {
+    private void handleMemberDetailClick(Player player, int slot, MemberInfo target) {
+        if (slot == 4) {
+            // 需求2: 成员管理最上方的成员头像点击执行 /profile（未来好友/个人资料功能）
             player.closeInventory();
-            pendingTransferInput.add(player.getUniqueId());
-            player.sendMessage(Lang.msg("transfer-prompt"));
+            player.performCommand("profile " + target.name());
             return;
         }
 
-        List<MemberInfo> members = service.getMembers(player.getUniqueId());
-        List<MemberInfo> candidates = new ArrayList<>();
-        for (MemberInfo m : members) {
-            if (!m.uuid().equals(player.getUniqueId())) candidates.add(m);
+        if (slot == 22) {
+            openMembersMenu(player);
+            return;
         }
 
-        int idx = slot - 10;
-        if (idx >= 0 && idx < candidates.size()) {
-            MemberInfo target = candidates.get(idx);
-            TransferResult res = service.transferWithReason(player.getUniqueId(), target.uuid());
+        // 重新获取最新身份
+        Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
+        Optional<GuildView> opt = service.guildOf(player.getUniqueId());
+        if (opt.isEmpty()) return;
+
+        // 槽位 11: 升职
+        if (slot == 11) {
+            Role targetRole = service.roleOf(target.uuid()).orElse(Role.MEMBER);
+            boolean canPromote = (myRole == Role.PRESIDENT && targetRole.ordinal() < Role.VICE_PRESIDENT.ordinal())
+                    || (myRole == Role.VICE_PRESIDENT && targetRole == Role.MEMBER);
+            if (!canPromote) return;
+
+            Role nextRole = Role.values()[targetRole.ordinal() + 1];
+            var res = service.promoteWithReason(player.getUniqueId(), target.uuid(), nextRole);
             if (res.success()) {
                 playSuccess(player);
-                player.sendMessage(Lang.msg("transfer-success", "player", target.name()));
-                openMain(player);
+                Role newRole = res.newRole() != null ? res.newRole() : service.roleOf(target.uuid()).orElse(Role.MEMBER);
+                player.sendMessage(Lang.text("broadcast.promote", "player", target.name(), "role", newRole.getMenuDisplay()));
+                service.guildOf(player.getUniqueId()).ifPresent(g -> {
+                    FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                            Lang.text("broadcast.promote", "player", target.name(), "role", newRole.getMenuDisplay()));
+                });
             } else {
                 playFail(player);
-                player.sendMessage(Lang.msg("transfer-failed", "reason", res.reason()));
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.member-detail.promote-failed", "reason", res.reason()));
             }
+            openMembersMenu(player);
+            return;
+        }
+
+        // 槽位 13: 降职
+        if (slot == 13) {
+            Role targetRole = service.roleOf(target.uuid()).orElse(Role.MEMBER);
+            boolean canDemote = (myRole == Role.PRESIDENT && targetRole.ordinal() > Role.MEMBER.ordinal() && targetRole.ordinal() < Role.PRESIDENT.ordinal())
+                    || (myRole == Role.VICE_PRESIDENT && targetRole == Role.ELDER);
+            if (!canDemote) return;
+
+            if (service.demote(player.getUniqueId(), target.uuid())) {
+                playSuccess(player);
+                Role newRole = service.roleOf(target.uuid()).orElse(Role.MEMBER);
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.member-detail.demote-success", "player", target.name(), "role", newRole.getMenuDisplay()));
+                service.guildOf(player.getUniqueId()).ifPresent(g -> {
+                    FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                            Lang.text("broadcast.demote", "player", target.name(), "role", newRole.getMenuDisplay()));
+                });
+            } else {
+                playFail(player);
+                player.sendMessage(Lang.msg("demote-failed"));
+            }
+            openMembersMenu(player);
+            return;
+        }
+
+        // 槽位 15: 踢出必须先经过独立确认界面。
+        if (slot == 15) requestKickConfirmation(player, target.uuid(), target.name());
+    }
+
+    private void handleTransferClick(Player player, int slot, MenuHolder holder) {
+        if (!(holder instanceof TransferMenuHolder snapshot)
+                || !snapshot.actor.equals(player.getUniqueId())) return;
+        GuildView guild = service.guildOf(player.getUniqueId()).orElse(null);
+        if (guild == null || !guild.name().equals(snapshot.guildName)
+                || !Objects.equals(guild.owner(), snapshot.owner)) {
+            confirmationFailure(player);
+            return;
+        }
+        if (slot == 27) { openManageMenu(player); return; }
+        if (slot == 31) {
+            UUID actor = player.getUniqueId();
+            clearPlayerInputs(actor);
+            player.closeInventory();
+            pendingTransferInput.add(actor);
+            Object session = new Object();
+            inputSessions.put(actor, session);
+            player.sendMessage(Lang.msg("transfer-prompt"));
+            Bukkit.getScheduler().runTaskLater(FreeCoreGuildPlugin.getInstance(), () -> {
+                if (pendingTransferInput.remove(actor) && inputSessions.remove(actor, session)
+                        && player.isOnline()) {
+                    player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.expired"));
+                }
+            }, 1200L);
+            return;
+        }
+        int idx = slot - 10;
+        if (slot <= 25 && idx >= 0 && idx < snapshot.candidates.size()) {
+            MemberInfo target = snapshot.candidates.get(idx);
+            requestTransferConfirmation(player, target.uuid(), target.name());
         }
     }
 
@@ -936,7 +1577,7 @@ public final class GuildMenuListener implements Listener {
 
                     // 需求7: gc广播新成员加入
                     FreeCoreGuildPlugin.getInstance().broadcastGuildCross(guildName,
-                            "§8[§b公会§8] §a欢迎新成员 §e" + name + " §a加入公会！");
+                            Lang.text("broadcast.join", "player", name));
                 } else {
                     playFail(player);
                     player.sendMessage(Lang.msg("app-approved-failed"));
@@ -967,62 +1608,63 @@ public final class GuildMenuListener implements Listener {
     }
 
     private void handleManageClick(Player player, int slot) {
-        if (slot == 31) { openMain(player); return; }
+        if (slot == 32) { openMain(player); return; }
 
-        if (slot == 11) {
-            Optional<GuildView> opt = service.guildOf(player.getUniqueId());
-            if (opt.isEmpty()) return;
-            int level = opt.get().level();
-            List<String> rewards = FreeCoreGuildPlugin.getInstance().getUpgradeRewardsForLevel(level);
-            if (rewards.isEmpty()) {
-                playFail(player);
-                player.sendMessage(Lang.msg("reward-not-unlocked"));
+        Role role = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
+        if (role == Role.PRESIDENT) {
+            if (slot == 10) {
+                Optional<GuildView> opt = service.guildOf(player.getUniqueId());
+                if (opt.isEmpty()) return;
+                int level = opt.get().level();
+                List<String> rewards = FreeCoreGuildPlugin.getInstance().getUpgradeRewardsForLevel(level);
+                if (rewards.isEmpty()) {
+                    playFail(player);
+                    player.sendMessage(Lang.msg("reward-not-unlocked"));
+                    return;
+                }
+                if (service.claimUpgradeReward(player.getUniqueId(), level)) {
+                    dispatchReward(player, rewards);
+                    playSuccess(player);
+                    player.sendMessage(Lang.msg("reward-claimed", "level", String.valueOf(level)));
+                    FreeCoreGuildPlugin.getInstance().broadcastGuildCross(opt.get().name(),
+                            Lang.text("broadcast.reward", "player", player.getName(), "level", String.valueOf(level)));
+                } else {
+                    playFail(player);
+                    player.sendMessage(Lang.msg("reward-already-claimed"));
+                }
+                openManageMenu(player);
                 return;
-            }
-            if (service.claimUpgradeReward(player.getUniqueId(), level)) {
-                dispatchReward(player, rewards);
-                playSuccess(player);
-                player.sendMessage(Lang.msg("reward-claimed", "level", String.valueOf(level)));
-            } else {
-                playFail(player);
-                player.sendMessage(Lang.msg("reward-already-claimed"));
-            }
-            openManageMenu(player);
-        } else if (slot == 13) {
-            openTransferMenu(player);
-        } else if (slot == 15) {
-            if (service.disband(player.getUniqueId())) {
-                playSuccess(player);
-                player.closeInventory();
-                player.sendMessage(Lang.msg("disbanded"));
-            } else {
-                playFail(player);
-                player.sendMessage(Lang.msg("disband-failed"));
-            }
-        } else if (slot == 29) {
-            Role myRole = service.roleOf(player.getUniqueId()).orElse(Role.MEMBER);
-            if (myRole == Role.PRESIDENT) {
-                playFail(player);
-                player.sendMessage(Lang.msg("leave-failed-owner"));
+            } else if (slot == 12) {
+                openTransferMenu(player);
                 return;
-            }
-            if (service.leave(player.getUniqueId())) {
-                playSuccess(player);
+            } else if (slot == 14) {
+                // 修改公会图标输入
                 player.closeInventory();
-                player.sendMessage(Lang.msg("left"));
-            } else {
-                playFail(player);
-                player.sendMessage(Lang.msg("leave-failed"));
+                pendingIconInput.add(player.getUniqueId());
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.manage.icon-prompt"));
+                return;
+            } else if (slot == 16) {
+                requestDisbandConfirmation(player);
+                return;
             }
         }
+
+        if (slot == 30) requestLeaveConfirmation(player);
     }
 
-    private void handleAllGuildsClick(Player player, int slot) {
+    private void handleAllGuildsClick(Player player, int slot, boolean left, boolean right) {
         long cd = service.getLeaveCooldownRemainingMillis(player.getUniqueId());
         if (cd > 0) {
             long hours = (cd / 3600_000L) + 1;
             playFail(player);
             player.sendMessage(Lang.msg("cooldown-active", "hours", String.valueOf(hours)));
+            return;
+        }
+
+        if (slot == 45) {
+            // 切换排序方式
+            toggleSort(player, left, right);
+            openAllGuildsList(player);
             return;
         }
 
@@ -1033,20 +1675,26 @@ public final class GuildMenuListener implements Listener {
             return;
         }
 
-        List<GuildView> list = service.getAllGuilds();
+        if (slot == 53) {
+            // 打开我的公会邀请列表
+            openInvitesMenu(player);
+            return;
+        }
+
+        List<GuildView> list = getSortedGuilds(player.getUniqueId());
         if (slot >= 0 && slot < list.size()) {
             GuildView g = list.get(slot);
-            if (service.apply(player.getUniqueId(), g.name())) {
+            var res = service.applyWithReason(player.getUniqueId(), g.name());
+            if (res.success()) {
                 playSuccess(player);
                 player.sendMessage(Lang.msg("app-submitted", "name", g.name()));
-                // 需求6 & 7: 申请公会时给公会所有成员/管理发送提醒(支持跨服)
                 String appNotify = Lang.msg("app-received-notify", "player", player.getName());
                 FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(), appNotify);
-                player.closeInventory();
             } else {
                 playFail(player);
-                player.sendMessage(Lang.msg("app-failed"));
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.all-guilds.apply-failed", "reason", res.reason()));
             }
+            openAllGuildsList(player);
         }
     }
 
@@ -1075,13 +1723,84 @@ public final class GuildMenuListener implements Listener {
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
+    public void onPaperChat(AsyncChatEvent event) {
+        Player player = event.getPlayer();
+        String message = PlainTextComponentSerializer.plainText().serialize(event.message());
+        if (!captureInput(player, event)) return;
+        event.setCancelled(true);
+        event.viewers().clear();
+        event.message(Component.empty());
+        event.renderer((source, sourceDisplayName, msg, viewer) -> Component.empty());
+        queueInput(player, message);
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onChat(AsyncPlayerChatEvent event) {
         Player player = event.getPlayer();
-        UUID uuid = player.getUniqueId();
-        String message = event.getMessage().trim();
+        String message = event.getMessage();
+        if (!captureInput(player, event)) return;
+        event.setCancelled(true);
+        event.getRecipients().clear();
+        event.setMessage("");
+        queueInput(player, message);
+    }
 
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPaperChatHighest(AsyncChatEvent event) {
+        if (!captureInput(event.getPlayer(), event)) return;
+        event.setCancelled(true);
+        event.viewers().clear();
+        event.message(Component.empty());
+        event.renderer((source, sourceDisplayName, msg, viewer) -> Component.empty());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onChatHighest(AsyncPlayerChatEvent event) {
+        if (!captureInput(event.getPlayer(), event)) return;
+        event.setCancelled(true);
+        event.getRecipients().clear();
+        event.setMessage("");
+    }
+
+    private boolean hasPendingInput(UUID uuid) {
+        return pendingGuildNameInput.containsKey(uuid)
+                || pendingInviteInput.contains(uuid)
+                || pendingCreateInput.contains(uuid)
+                || pendingDonateInput.contains(uuid)
+                || pendingApplyInput.contains(uuid)
+                || pendingTransferInput.contains(uuid)
+                || pendingIconInput.contains(uuid);
+    }
+
+    private void handleChatInput(Player player, String message) {
+        UUID uuid = player.getUniqueId();
+
+        ConfirmationHolder confirmation = pendingGuildNameInput.remove(uuid);
+        if (confirmation != null) {
+            message = message.trim();
+            if (message.equals("取消") || message.equalsIgnoreCase("cancel")) {
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.cancelled"));
+                return;
+            }
+            if (!message.equals(confirmation.guildName)) {
+                playFail(player);
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.wrong-name"));
+                return;
+            }
+            try {
+                executeConfirmedAction(player, confirmation);
+            } catch (RuntimeException ex) {
+                confirmationFailure(player);
+            }
+            return;
+        }
+        // Existing non-confirmation inputs retain their whitespace normalization.
+        handleOrdinaryChatInput(player, message.trim());
+    }
+
+    private void handleOrdinaryChatInput(Player player, String message) {
+        UUID uuid = player.getUniqueId();
         if (pendingInviteInput.remove(uuid)) {
-            event.setCancelled(true);
             Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
                 player.performCommand("guild invite " + message);
             });
@@ -1089,7 +1808,6 @@ public final class GuildMenuListener implements Listener {
         }
 
         if (pendingCreateInput.remove(uuid)) {
-            event.setCancelled(true);
             Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
                 long cd = service.getLeaveCooldownRemainingMillis(player.getUniqueId());
                 if (cd > 0) {
@@ -1112,7 +1830,6 @@ public final class GuildMenuListener implements Listener {
         }
 
         if (pendingDonateInput.remove(uuid)) {
-            event.setCancelled(true);
             try {
                 long amount = Long.parseLong(message);
                 if (amount <= 0) throw new NumberFormatException();
@@ -1125,7 +1842,6 @@ public final class GuildMenuListener implements Listener {
         }
 
         if (pendingApplyInput.remove(uuid)) {
-            event.setCancelled(true);
             Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
                 long cd = service.getLeaveCooldownRemainingMillis(player.getUniqueId());
                 if (cd > 0) {
@@ -1148,8 +1864,13 @@ public final class GuildMenuListener implements Listener {
         }
 
         if (pendingTransferInput.remove(uuid)) {
-            event.setCancelled(true);
-            Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
+            inputSessions.remove(uuid);
+            if (message.equals("取消") || message.equalsIgnoreCase("cancel")) {
+                player.sendMessage(Lang.getPrefix() + Lang.text("menus.confirm.cancelled"));
+                return;
+            }
+            // queueInput already moved this onto the main thread; do not defer past a newer request.
+            {
                 List<MemberInfo> members = service.getMembers(player.getUniqueId());
                 MemberInfo found = null;
                 for (MemberInfo m : members) {
@@ -1164,20 +1885,40 @@ public final class GuildMenuListener implements Listener {
                     return;
                 }
 
-                TransferResult res = service.transferWithReason(player.getUniqueId(), found.uuid());
-                if (res.success()) {
+                requestTransferConfirmation(player, found.uuid(), found.name());
+            }
+            return;
+        }
+
+        if (pendingIconInput.remove(uuid)) {
+            Bukkit.getScheduler().runTask(FreeCoreGuildPlugin.getInstance(), () -> {
+                Material mat = Material.matchMaterial(message.toUpperCase(Locale.ROOT));
+                if (mat == null || !mat.isItem()) {
+                    playFail(player);
+                    player.sendMessage(Lang.getPrefix() + Lang.text("menus.manage.icon-invalid", "input", message));
+                    return;
+                }
+                if (service.setGuildIcon(player.getUniqueId(), mat.name())) {
                     playSuccess(player);
-                    player.sendMessage(Lang.msg("transfer-success", "player", found.name()));
+                    player.sendMessage(Lang.getPrefix() + Lang.text("menus.manage.icon-success", "icon", mat.name()));
+                    service.guildOf(player.getUniqueId()).ifPresent(g -> {
+                        FreeCoreGuildPlugin.getInstance().broadcastGuildCross(g.name(),
+                                Lang.text("broadcast.icon", "icon", mat.name()));
+                    });
+                    GuildRedisBridge bridge = FreeCoreGuildPlugin.getInstance().getRedisBridge();
+                    if (bridge != null) {
+                        bridge.publish("SYNC_ALL|||");
+                    }
                 } else {
                     playFail(player);
-                    player.sendMessage(Lang.msg("transfer-failed", "reason", res.reason()));
+                    player.sendMessage(Lang.getPrefix() + Lang.text("menus.manage.icon-failed"));
                 }
             });
         }
     }
 
     private static void fill(Inventory inv) {
-        ItemStack pane = item(Material.GRAY_STAINED_GLASS_PANE, " ", null);
+        ItemStack pane = item(Material.GRAY_STAINED_GLASS_PANE, Lang.text("menus.common.background-name"), null);
         for (int i = 0; i < inv.getSize(); i++) inv.setItem(i, pane);
     }
 
@@ -1194,8 +1935,65 @@ public final class GuildMenuListener implements Listener {
         return stack;
     }
 
-    public enum MenuType { NO_GUILD, MAIN, BASE_MANAGE, DONATE, MEMBERS, APPLICATIONS, TRANSFER, SHOP, MANAGE, ALL_GUILDS }
-    public record MenuHolder(MenuType type) implements InventoryHolder {
+    public enum MenuType { NO_GUILD, MAIN, BASE_MANAGE, DONATE, MEMBERS, MEMBER_DETAIL, APPLICATIONS, TRANSFER, SHOP, MANAGE, ALL_GUILDS, ALL_GUILDS_PREVIEW, MY_INVITES, CONFIRM }
+    public static class MenuHolder implements InventoryHolder {
+        public final MenuType type;
+        public MenuHolder(MenuType type) { this.type = type; }
         @Override public Inventory getInventory() { return null; }
+    }
+    private enum DestructiveAction { KICK, LEAVE, DISBAND, TRANSFER }
+
+    /** Immutable request snapshot; consumption is tracked outside the holder by identity. */
+    private static final class ConfirmationHolder extends MenuHolder {
+        private final DestructiveAction action;
+        private final UUID actor, owner, target;
+        private final String guildName, targetName;
+        private final long guildCreatedAt, guildIdentity, createdAt;
+        private ConfirmationHolder(DestructiveAction action, UUID actor, UUID owner, String guildName,
+                                   long guildCreatedAt, long guildIdentity, long createdAt, UUID target, String targetName) {
+            super(MenuType.CONFIRM);
+            this.action = action;
+            this.actor = actor;
+            this.owner = owner;
+            this.guildName = guildName;
+            this.guildCreatedAt = guildCreatedAt;
+            this.guildIdentity = guildIdentity;
+            this.createdAt = createdAt;
+            this.target = target;
+            this.targetName = targetName;
+        }
+
+        private ConfirmationHolder withCreatedAt(long createdAt) {
+            return new ConfirmationHolder(action, actor, owner, guildName, guildCreatedAt, guildIdentity,
+                    createdAt, target, targetName);
+        }
+    }
+
+    private static final class TransferMenuHolder extends MenuHolder {
+        private final UUID actor, owner;
+        private final String guildName;
+        private final List<MemberInfo> candidates;
+        private TransferMenuHolder(UUID actor, GuildView guild, List<MemberInfo> candidates) {
+            super(MenuType.TRANSFER);
+            this.actor = actor;
+            this.owner = guild.owner();
+            this.guildName = guild.name();
+            this.candidates = List.copyOf(candidates);
+        }
+    }
+
+    public static final class InviteMenuHolder extends MenuHolder {
+        private final List<GuildService.GuildInvite> invites;
+        public InviteMenuHolder(List<GuildService.GuildInvite> invites) {
+            super(MenuType.MY_INVITES);
+            this.invites = List.copyOf(invites);
+        }
+    }
+    public static final class MemberDetailHolder extends MenuHolder {
+        public final MemberInfo target;
+        public MemberDetailHolder(MemberInfo target) {
+            super(MenuType.MEMBER_DETAIL);
+            this.target = target;
+        }
     }
 }

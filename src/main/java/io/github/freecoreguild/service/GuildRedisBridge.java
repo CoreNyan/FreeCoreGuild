@@ -135,11 +135,11 @@ public final class GuildRedisBridge {
         return result;
     }
 
-    /** 跨服设置邀请信息 (有效期60秒) */
+    /** 跨服设置邀请信息 (有效期300秒) */
     public void setInvite(UUID targetPlayer, String guildName, String inviterName) {
-        long expireAt = System.currentTimeMillis() + 60_000L;
+        long expireAt = System.currentTimeMillis() + 300_000L;
         String val = guildName + "|" + inviterName + "|" + expireAt;
-        executor.execute(() -> execute("SET", INVITE_KEY + targetPlayer, val, "EX", "60"));
+        executor.execute(() -> execute("SET", INVITE_KEY + targetPlayer, val, "EX", "300"));
     }
 
     /** 获取邀请信息: 返回 [guildName, inviterName] 或 null */

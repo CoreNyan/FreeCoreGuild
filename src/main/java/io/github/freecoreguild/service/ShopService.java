@@ -1,5 +1,6 @@
 package io.github.freecoreguild.service;
 
+import io.github.freecoreguild.lang.Lang;
 import io.github.freecoreguild.EconomyGateway;
 import io.github.freecoreguild.api.GuildProvider.Role;
 import io.github.freecoreguild.api.ShopProvider;
@@ -50,32 +51,42 @@ public final class ShopService implements ShopProvider {
     public Optional<ShopItem.Offer> offer(String itemId, Role role) { return config.item(itemId).map(i -> i.offers().get(role)); }
 
     public LimitDecision checkLimit(UUID player, String itemId, Role role, int requestedAmount) {
-        if (requestedAmount <= 0) return new LimitDecision(false, 0, 0, "数量必须大于零");
+        if (requestedAmount <= 0) return new LimitDecision(false, 0, 0, Lang.text("results.shop.invalid-amount"));
         ShopItem.Offer offer = offer(itemId, role).orElse(null);
-        if (offer == null) return new LimitDecision(false, 0, 0, "商品或该层级配置不存在");
+        if (offer == null) return new LimitDecision(false, 0, 0, Lang.text("results.shop.missing-offer"));
         if (offer.limitType() == ShopItem.LimitType.UNLIMITED || offer.limitAmount() <= 0)
-            return new LimitDecision(true, Integer.MAX_VALUE, 0, "不限购");
+            return new LimitDecision(true, Integer.MAX_VALUE, 0, Lang.text("results.shop.unlimited"));
         Instant start = windowStart(offer.limitType());
         int bought = Math.max(0, ledger.purchased(player, itemId, start, clock.instant()));
         if (recorder == null) bought += memoryPurchases.getOrDefault(new PurchaseKey(player, itemId, start), 0);
         int remaining = Math.max(0, offer.limitAmount() - bought);
         return new LimitDecision(requestedAmount <= remaining, remaining, bought,
-                requestedAmount <= remaining ? "可购买" : "超过限购，剩余 " + remaining);
+                requestedAmount <= remaining ? Lang.text("results.shop.allowed") : Lang.text("results.shop.limit-exceeded", "remaining", String.valueOf(remaining)));
     }
 
     public LimitDecision canPurchase(UUID player, String itemId, Role role, int requestedAmount) { return checkLimit(player, itemId, role, requestedAmount); }
 
     /** Charges, delivers and records a purchase. */
     public PurchaseResult purchase(Player player, String itemId, Role role, int amount) {
-        if (player == null) return new PurchaseResult(false, "玩家无效");
+        if (player == null) return new PurchaseResult(false, Lang.text("results.invalid-player-short"));
         LimitDecision decision = checkLimit(player.getUniqueId(), itemId, role, amount);
         if (!decision.allowed()) return new PurchaseResult(false, decision.reason());
         ShopItem.Offer offer = offer(itemId, role).orElse(null);
         if (offer == null || !Double.isFinite(offer.price()) || offer.price() < 0)
-            return new PurchaseResult(false, "商品价格配置无效");
+            return new PurchaseResult(false, Lang.text("results.shop.invalid-price"));
         double cost = offer.price() * amount;
-        if (!Double.isFinite(cost) || cost < 0 || economy == null || cost > 0 && !economy.withdraw(player, cost))
-            return new PurchaseResult(false, "余额不足或经济系统不可用");
+        if (!Double.isFinite(cost) || cost < 0) {
+            return new PurchaseResult(false, Lang.text("results.shop.invalid-total-price"));
+        }
+        if (economy == null) {
+            return new PurchaseResult(false, Lang.text("results.shop.no-economy"));
+        }
+        if (cost > 0 && economy.getBalance(player) < cost) {
+            return new PurchaseResult(false, Lang.text("results.shop.insufficient-funds", "cost", String.valueOf((long)cost), "balance", String.valueOf((long)economy.getBalance(player))));
+        }
+        if (cost > 0 && !economy.withdraw(player, cost)) {
+            return new PurchaseResult(false, Lang.text("results.shop.withdraw-failed"));
+        }
         try {
             if (!deliver(player, offer.material(), amount)) throw new IllegalStateException("delivery failed");
             Instant start = windowStart(offer.limitType());
@@ -83,14 +94,14 @@ public final class ShopService implements ShopProvider {
             if (recorder != null && gid > 0 && !recorder.recordPurchase(gid, player.getUniqueId(), itemId, amount, start))
                 throw new IllegalStateException("record failed");
             memoryPurchases.merge(new PurchaseKey(player.getUniqueId(), itemId, start), amount, Integer::sum);
-            return new PurchaseResult(true, "购买成功");
+            return new PurchaseResult(true, Lang.text("results.shop.success"));
         } catch (RuntimeException ex) {
             if (cost > 0) economy.refund(player, cost);
-            return new PurchaseResult(false, "发放商品失败，请稍后重试");
+            return new PurchaseResult(false, Lang.text("results.shop.delivery-failed"));
         }
     }
     public PurchaseResult purchase(UUID player, String itemId, Role role, int amount) {
-        Player p = Bukkit.getPlayer(player); return p == null ? new PurchaseResult(false, "玩家不在线") : purchase(p, itemId, role, amount);
+        Player p = Bukkit.getPlayer(player); return p == null ? new PurchaseResult(false, Lang.text("results.shop.offline")) : purchase(p, itemId, role, amount);
     }
     private boolean deliver(Player player, String value, int amount) {
         if (value == null || value.isBlank()) return false;

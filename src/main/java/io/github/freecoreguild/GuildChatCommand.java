@@ -1,5 +1,6 @@
 package io.github.freecoreguild;
 
+import io.github.freecoreguild.lang.Lang;
 import io.github.freecoreguild.service.GuildRedisBridge;
 import io.github.freecoreguild.service.GuildService;
 import org.bukkit.Bukkit;
@@ -24,18 +25,18 @@ public final class GuildChatCommand implements CommandExecutor, TabCompleter {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!(sender instanceof Player player)) {
-            sender.sendMessage("§c只有玩家可以使用公会聊天频道！");
+            sender.sendMessage(Lang.text("chat.player-only"));
             return true;
         }
 
         var opt = service.guildOf(player.getUniqueId());
         if (opt.isEmpty()) {
-            player.sendMessage("§c你当前未加入任何公会，无法在公会频道发言！");
+            player.sendMessage(Lang.text("chat.no-guild"));
             return true;
         }
 
         if (args.length == 0) {
-            player.sendMessage("§6用法：§e/gc <消息内容>");
+            player.sendMessage(Lang.text("chat.usage"));
             return true;
         }
 
@@ -46,7 +47,7 @@ public final class GuildChatCommand implements CommandExecutor, TabCompleter {
         var role = service.roleOf(player.getUniqueId()).orElse(io.github.freecoreguild.api.GuildProvider.Role.MEMBER);
 
         // 格式化公会聊天内容
-        String formatted = "§8[§b公会聊天§8] §7[" + role.getMenuDisplay() + "§7] §f" + player.getName() + "§7: §f" + msg;
+        String formatted = Lang.text("chat.format", "role", String.valueOf(role.getMenuDisplay()), "player", String.valueOf(player.getName()), "msg", String.valueOf(msg));
 
         // 本地广播给公会在线成员
         broadcastLocal(guildName, formatted);

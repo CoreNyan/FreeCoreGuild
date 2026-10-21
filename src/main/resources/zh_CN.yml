@@ -1,3 +1,10 @@
+# FreeCoreGuild 全部玩家语言配置（UTF-8）
+# 代码只引用语言键，不再内嵌中文默认文案。缺失键会在启动/重载时补入，已有自定义值不覆盖。
+# 菜单: menus；商城界面: shop-menu；职位: roles；聊天: chat；广播: broadcast；服务原因: results。
+# 截图基地提示: menus.main.base-lore-admin / base-lore-member / base-lore-desc。
+# 修改后使用 /guild reload，关闭并重新打开菜单查看效果。
+# {name}、{role} 等为占位符，请保留需要显示的数据。
+
 # FreeCore 统一语言与 GUI 菜单文案配置文件
 # 规范要求：
 # 1. 消息头：<插件功能> &f&l>>> &f这是范例信息 (例如 &b&l公会 &f&l>>> &f...)
@@ -6,6 +13,8 @@
 prefix: '&b&l公会 &f&l>>> &f'
 
 messages:
+  no-permission-use: '&c你没有使用公会功能的权限！'
+  no-permission-admin: '&c你没有权限执行该公会管理指令！'
   player-only: '&c该命令只能由玩家在游戏内执行！'
   usage: '&6请使用 &e/guild &6打开公会菜单，或使用 &e/guild help &6查看帮助。'
   no-guild: '&c你当前未加入任何公会，无法进行该操作！'
@@ -13,7 +22,8 @@ messages:
   created: '&a恭喜你成功创建公会：“&e{name}&a”！'
   create-failed: '&c创建公会失败，请检查你的H币余额是否充足（需 &e{cost} H币&c）或名称已被占用！'
   create-prompt: '&6请在聊天栏输入你要创建的公会名称（需花费 &e{cost} H币&6）：'
-  info: '&b公会名称：“&f{name}&b”，等级：&eLv.{level}&b，繁荣度：&e{xp}&b，成员：&e{members}/{max}&b。'
+  info: '&b公会名称：“&f{name}&b”，等级：&eLv.{level}&b，累计繁荣度：&e{xp}&b，下一级累计需要：&e{next_xp}&b，成员：&e{members}/{max}&b。'
+  max-level: '已达最高等级'
   checked-in: '&a今日公会签到成功！获得奖励 &e{gold} 个粗金矿石&a，公会增加 &e{prosperity} &a点繁荣度！'
   already-checked-in: '&c签到失败，你今日已完成过签到！'
   checkin-failed: '&c签到失败，{message}！'
@@ -21,12 +31,13 @@ messages:
   donate-invalid: '&c输入的捐献数量无效，请输入大于0的正整数！'
   donated: '&a成功捐献 &e{amount} H币&a，公会增加对应繁荣度！'
   donate-failed: '&c捐献失败，请检查你的H币余额是否充足！'
-  auto-upgraded: '&6&lFreeCore &f&l>>> &a&l公会繁荣度已达标，已自动升至 &e&lLv.{level} &a&l！'
+  auto-upgraded: '&a&l公会繁荣度已达标，已自动升至 &e&lLv.{level} &a&l！'
   left: '&a你已成功退出公会。'
   leave-failed-owner: '&c你是公会会长，无法直接退出！请在“转让会长”或“解散公会”中二选一！'
   leave-failed: '&c退出失败！'
   disbanded: '&a公会已成功解散，所有公会成员与假人数据已清除！'
   disband-failed: '&c仅公会会长拥有解散公会的权限！'
+  disband-save-failed: '&c公会解散失败，数据未成功删除或公会状态已变化，请稍后重试；持续失败请联系管理员查看日志！'
   reward-claimed: '&a已成功领取 Lv.{level} 级公会升级奖励！'
   reward-already-claimed: '&c该等级的升级奖励已经领取过了，不可重复领取！'
   reward-not-unlocked: '&c公会尚未达到该等级或未配置奖励，暂无法领取该奖励！'
@@ -58,9 +69,11 @@ messages:
   cooldown-active: '&c你刚退出公会不久，尚在冷却期内（剩余约 &e{hours} &c小时），暂时无法进行该操作！'
   invite-no-permission: '&c仅长老及以上职位的管理人员才可发起公会邀请！'
   invite-sent: '&a已向玩家 &e{player} &a发送加入公会邀请！'
-  invite-received: '&6玩家 &e{inviter} &6邀请你加入公会“&e{guild}&6”！输入 &a/guild accept &6接受，或输入 &c/guild deny &6拒绝（有效期60秒）。'
+  invite-received: '&6玩家 &e{inviter} &6邀请你加入公会“&e{guild}&6”！输入 &a/guild accept
+    &6接受，或输入 &c/guild deny &6拒绝（有效期60秒）。'
   invite-target-in-guild: '&c玩家 &e{player} &c已有公会，无法邀请！'
   invite-target-cooldown: '&c玩家 &e{player} &c正处于退会冷却期中，无法加入公会！'
+  invite-target-not-found: '&c未找到玩家“{player}”！'
   invite-none: '&c你当前没有任何待处理的公会邀请！'
   invite-expired: '&c公会邀请已过期！'
   invite-accepted: '&a你已成功加入公会“&e{guild}&a”！'
@@ -69,9 +82,11 @@ messages:
   invite-rejected-notify: '&6玩家 &e{player} &6拒绝了你的入会邀请。'
   invite-prompt: '&6请在聊天栏输入你要邀请的玩家名称：'
   admin-shop-refreshed: '&a已成功重置公会商店限购限制！'
-  app-received-notify: '&b&l[公会] &f玩家 &e{player} &f申请加入公会，请管理人员及时审核！'
-  app-approved-notify: '&b&l[公会] &a你的入会申请已被公会“&e{guild}&a”批准，欢迎加入！'
-  app-rejected-notify: '&b&l[公会] &c你加入公会“&e{guild}&c”的申请已被拒绝。'
+  app-received-notify: '&a玩家 &e{player} &a申请加入公会，请管理人员及时审核！'
+  app-approved-notify: '&a你的入会申请已被公会“&e{guild}&a”批准，欢迎加入！'
+  app-rejected-notify: '&c你加入公会“&e{guild}&c”的申请已被拒绝。'
+  base-world-unloaded: "&c公会基地所在世界尚未加载！"
+  refund-failed: "&c捐献保存失败且自动退款未成功，请联系管理员核对，勿重复操作。"
 
 menus:
   common:
@@ -87,6 +102,10 @@ menus:
     back-manage: '&7返回公会管理'
     back-manage-lore:
       - '&7返回公会管理菜单'
+    max-level: 已达最高等级
+    president-separator: "&7, &e"
+    none: 暂无
+    background-name: " "
 
   no-guild:
     title: '&3加入或创建公会'
@@ -108,54 +127,65 @@ menus:
     info-lore:
       - '&7-----------------------------'
       - '&f公会等级: &eLv.{level}'
-      - '&f当前繁荣度: &e{xp} &7(达标后由系统自动升级)'
+      - '&f当前繁荣度: &e{xp}'
+      - '&f下一级所需繁荣度: &e{next_xp}'
       - '&f成员数量: &e{members} &7/ &f{max}'
-      - '&f我的职位: {role}'
       - '&f假人配额: &e{fake_current} &7/ &f{fake_max}'
+      - '&f我的职位: {role}'
       - '&7-----------------------------'
     checkin-title: '&a&l每日签到'
     checkin-lore:
-      - '&7点击进行今日公会签到'
-      - '&7平时奖励: &e1000 繁荣度 + 10 粗金矿石'
-      - '&6周末奖励: &e3000 繁荣度 + 30 粗金矿石！'
+      - '&7每日签到可领取奖励'
+      - '&7并为公会增加繁荣度！'
+      - ' '
+      - '{checkin_status}'
+    checkin-status-done: '&c[你今天已经签到过了]'
+    checkin-status-ready: '&a[▶ 点击立即签到]'
     donate-title: '&e&l公会捐献'
     donate-lore:
-      - '&7点击打开独立捐献菜单'
-      - '&7使用 &eH币 &7为公会贡献繁荣度 (1H币=1繁荣度)'
-      - '&a繁荣度达标后将由系统自动升级！'
+      - '&7点击打开捐献菜单'
+      - '&7使用 &eH币 &7为公会提升繁荣度)'
     shop-title: '&d&l公会商城'
     shop-lore:
-      - '&7浏览并购买公会专属商品'
-      - '&7职位越高可享受更低折扣与专属配额！'
-    base-title: '&b&l公会基地'
-    base-lore-admin: '&e[会长/副会长] 点击打开传送或设置菜单'
-    base-lore-member: '&a[普通成员] 点击直接传送到公会基地'
+      - '&7浏览并购买商品'
+    base-lore-admin: "&e[会长/副会长] 点击打开传送或设置菜单"
+    base-lore-member: "&a[普通成员] 点击直接传送到公会基地"
+    base-title: "&b&l公会基地"
     base-lore-desc:
-      - '&7传送至公会设立的专属基地'
-      - '{action}'
-      - '&7支持全服无缝跨服传送！'
-    members-title: '&b&l成员管理'
+      - "&7传送至公会设立的专属基地"
+      - "{action}"
+      - "&7支持全服无缝跨服传送！"
+    members-title: "&b&l成员管理"
     members-lore:
-      - '&7查看全体成员、职位与贡献'
-      - '&7管理成员晋升、踢人与入会申请审批'
-    manage-title: '&c&l公会管理'
+      - "&7查看全体成员、职位与贡献"
+      - "&7管理成员晋升、踢人与入会申请审批"
+    list-title: "&6&l全服公会列表"
+    list-lore:
+      - "&7浏览服务器内已创建的全部公会"
+      - "&7查看其他公会的等级、繁荣度与规模"
+      - " "
+      - "&a▶ 点击打开公会列表"
+    manage-title: "&c&l公会管理"
     manage-lore:
-      - '&7会长领取等级升级奖励'
-      - '&7公会转让、退出公会或解散公会'
+      - "&7会长领取等级升级奖励"
+      - "&7公会转让、退出公会或解散公会"
 
   base-manage:
-    title: '&3公会基地管理'
+    title: '&3公会基地'
     status-title: '&b&l公会基地状态'
     status-set: '&a已设置: {server} ({x},{y},{z})'
     status-unset: '&c当前尚未设置公会基地'
     teleport-title: '&a&l【传送到公会基地】'
     teleport-lore:
       - '&7立即传送到公会基地'
-      - '&7支持跨服自动传送定位！'
     set-title: '&e&l【设置当前位置为基地】'
     set-lore:
-      - '&7将你脚下的当前位置保存为公会基地'
-      - '&6所有公会成员均可跨服传送至此！'
+      - '&7将你脚下的位置保存为公会基地'
+      - '&6所有公会成员均可传送至此！'
+    status-lore:
+      - "&7-----------------------------"
+      - "{status}"
+      - "&7-----------------------------"
 
   donate:
     title: '&3H币捐献 - {name}'
@@ -172,6 +202,7 @@ menus:
     custom-lore:
       - '&7点击后在聊天栏直接输入要捐献的H币数量'
       - '&8(输入的内容已被系统拦截，不会在公屏出现)'
+    amount-format: "%,d"
 
   members:
     title: '&3成员管理 - {name}'
@@ -186,9 +217,47 @@ menus:
       - '&f累计繁荣贡献: &e{contribution}'
       - '&f最后签到: &7{last_checkin}'
       - '&7-----------------------------'
-    action-promote: '&a[左键点击] 晋升职位'
-    action-demote: '&6[右键点击] 降低职位'
-    action-kick: '&c[Shift+右键] 踢出公会'
+      - '&a[点击] 打开操作该成员'
+    action-promote: ''
+    action-demote: ''
+    action-kick: ''
+    invite-title: §a§l【邀请新成员】
+    invite-lore:
+      - "&7允许长老及以上职级邀请玩家加入公会"
+      - "&a点击后在聊天栏直接输入被邀请玩家名称"
+      - "&7也可使用指令: &e/guild invite <玩家名>"
+
+  member-detail:
+    title: '&3查看成员 - {name}'
+    info-title: '{role} &f{name}'
+    info-lore:
+      - '&7-----------------------------'
+      - '&f职位: {role}'
+      - '&f累计贡献: &e{contribution}'
+      - '&f最后签到: &7{last_checkin}'
+      - '&7-----------------------------'
+      - ' '
+      - '&b▶ 点击查看个人资料 (/profile)'
+    promote-title: '&a&l【晋升职位】'
+    promote-lore:
+      - '&7将该成员晋升为更高职级'
+      - '&7新职位: {next_role}'
+      - ' '
+      - '&a▶ 点击立即晋升'
+    demote-title: '&6&l【降低职位】'
+    demote-lore:
+      - '&7将该成员降职为较低职级'
+      - '&7新职位: {prev_role}'
+      - ' '
+      - '&6▶ 点击立即降职'
+    kick-title: '&c&l【踢出公会】'
+    kick-lore:
+      - '&7将该成员移出公会'
+      - '&c被踢出后将进入退会冷却期'
+      - ' '
+      - '&c▶ 点击进入踢出确认菜单'
+    promote-failed: "&c晋升失败！{reason}"
+    demote-success: "&6已将成员 &e{player} &6降职为 &f{role}&6！"
 
   transfer:
     title: '&3选择会长转让目标 - {name}'
@@ -198,9 +267,10 @@ menus:
       - '&f当前职位: {role}'
       - '&f累计贡献: &e{contribution}'
       - '&7-----------------------------'
-      - '&a[点击将会长职位转让给TA]'
+      - '&a[点击进入转让确认菜单]'
+      - '&7确认后还需准确输入当前公会名称'
       - '&c转让后你将自动变更为副会长！'
-    chat-title: '&e&l公屏输入玩家名称转让'
+    chat-title: '&e&l聊天输入玩家名选择转让目标'
     chat-lore:
       - '&7点击后在聊天栏直接输入目标玩家名 (不区分大小写)'
       - '&8(输入内容已拦截，不会发送到公屏)'
@@ -217,20 +287,29 @@ menus:
     transfer-title: '&b&l【转让公会】'
     transfer-lore:
       - '&7将公会所有权转让给指定成员'
-      - '&c转让完成后你将自动降职为副会长！'
-      - '&a点击打开成员转让选择面板'
     disband-title: '&c&l【解散公会】'
     disband-lore:
       - '&4永久解散公会，不可逆！'
-      - '&7清空所有公会成员与假人数据'
-      - '&c点击后立即解散公会'
+      - '&7清空所有公会与假人数据'
+      - '&c点击进入二级确认菜单，再输入公会名称'
+    icon-title: '&e&l【修改公会图标】'
+    icon-lore:
+      - '&7自定义公会列表里展示的物品图标'
+      - '&7当前图标: &e{icon}'
+      - ' '
+      - '&a▶ 点击后在聊天框输入物品材质名'
     leave-title: '&c&l【退出公会】'
     leave-lore:
       - '&7离开当前公会'
       - '&c注意：退会后将进入冷却期，冷却期内无法加会或创会！'
+      - '&e点击进入二级确认菜单，再输入公会名称'
     non-owner-title: '&7公会信息'
     non-owner-lore:
       - '&7你的职位为: {role}&7，高级管理仅限会长。'
+    icon-prompt: §6请在聊天栏输入新的公会物品图标材质名（例如 §eDIAMOND_SWORD§6、§eSHIELD§6 等）：
+    icon-invalid: "&c无效的物品材质名：“&e{input}&c”！请输入合法的 Minecraft 物品 ID。"
+    icon-success: "&a成功将公会图标修改为 &e{icon}&a！"
+    icon-failed: §c修改公会图标失败！只有会长可以修改图标。
 
   applications:
     title: '&3入会申请审核 ({count})'
@@ -239,18 +318,297 @@ menus:
       - '&7UUID: {uuid}'
       - '&a[左键点击] 同意加入'
       - '&c[右键点击] 拒绝申请'
+    no-permission: §c你没有权限查看入会申请！
 
   all-guilds:
     title: '&3申请加入公会 ({count})'
     item-title: '&b{name} &7(Lv.{level})'
     item-lore:
       - '&7-----------------------------'
+      - '&f会长: &e{presidents}'
       - '&f公会等级: &eLv.{level}'
       - '&f繁荣度: &e{xp}'
+      - '&f下一级所需繁荣度: &e{next_xp}'
       - '&f成员数量: &e{members} &7/ &f{max}'
       - '&7-----------------------------'
       - '&a[点击申请加入该公会]'
+    sort-btn: '&e&l【排序/筛选】'
+    sort-lore:
+      - '&7当前排序: &a{mode}'
+      - '&7当前方向: &e{order}'
+      - ' '
+      - '&a▶ 左键点击: 切换排序模式'
+      - '&e(最新创建/繁荣度/名称A-Z)'
+      - '&6▶ 右键点击: 切换正序/倒序'
     chat-title: '&e&l聊天栏输入公会名申请'
     chat-lore:
       - '&7点击后在聊天栏输入公会名称直接申请'
       - '&8(输入已受拦截保护)'
+    my-invites-btn: "&e&l【我的公会邀请】"
+    my-invites-lore:
+      - "&7查看所有向你发起的公会邀请 (当前: &e{count}&7)"
+      - "&a▶ 点击打开邀请列表进行同意或拒绝"
+    sort-mode-newest: 最新创建
+    sort-mode-prosperity: 公会繁荣度
+    sort-mode-name: 首字母 A-Z
+    sort-order-ascending: 正序 (从小到大/A-Z)
+    sort-order-descending: 倒序 (从大到小/最新)
+    apply-failed: "&c申请加入失败！{reason}"
+
+  all-guilds-preview:
+    title: '&3全服公会列表 ({count})'
+    item-title: '&b{name} &7(Lv.{level})'
+    item-lore:
+      - '&7-----------------------------'
+      - '&f会长: &e{presidents}'
+      - '&f公会等级: &eLv.{level}'
+      - '&f繁荣度: &e{xp}'
+      - '&f下一级所需繁荣度: &e{next_xp}'
+      - '&f成员数量: &e{members} &7/ &f{max}'
+      - '&7-----------------------------'
+    sort-btn: '&e&l【排序/筛选】'
+    sort-lore:
+      - '&7当前排序: &a{mode}'
+      - '&7当前方向: &e{order}'
+      - ' '
+      - '&a▶ 左键点击: 切换排序模式'
+      - '&e(最新创建/繁荣度/名称A-Z)'
+      - '&6▶ 右键点击: 切换正序/倒序'
+    my-invites-btn: '&e&l【我的公会邀请】'
+    my-invites-lore:
+      - '&7查看所有向你发起的公会邀请'
+      - '&a▶ 点击打开邀请列表进行同意或拒绝'
+
+  my-invites:
+    title: '&3待处理公会邀请 ({count})'
+    item-title: '&e公会: &f{guild}'
+    item-lore:
+      - '&7邀请人: &f{inviter}'
+      - '&7有效剩余: &e{remain} 秒'
+      - '&7-----------------------------'
+      - '&a[左键点击] 接受邀请加入公会'
+      - '&c[右键点击] 拒绝该公会邀请'
+    empty-title: '&7暂无待处理的邀请'
+    empty-lore:
+      - '&7当前没有任何公会向你发起邀请'
+    load-failed: §c邀请数据加载失败，请稍后重试。
+    process-failed: §c邀请处理失败，请稍后重试。
+    back-lore:
+      - "&7返回申请加入列表"
+  confirm:
+    kick-title: "&c确认是否踢出？"
+    leave-title: "&c确认是否退出公会？"
+    disband-title: "&4确认是否解散公会？"
+    transfer-title: "&c确认是否转让公会？"
+    guild: "&e公会：{name}"
+    target: "&7操作目标：{target}"
+    timeout: "&760 秒内有效；关闭菜单不会执行操作。"
+    cancel: "&a取消"
+    confirm: "&c确认"
+    kick-warning: "&c确认后踢出该成员。"
+    name-warning: "&7下一步需在私密聊天输入完整公会名称。"
+    expired: "&c确认已超时，请重新发起操作。"
+    invalid: "&c操作失败或确认已失效：公会、成员或权限可能已变更，请重新发起操作。"
+    cancelled: "&7已取消操作。"
+    name-prompt: "&e请在聊天栏输入完整公会名称：&f{name}&e（区分大小写）。输入不会发送到公屏；输入 取消 / cancel 可取消，60 秒有效。"
+    wrong-name: "&c公会名称不完全匹配，操作已取消。"
+  errors:
+    no-use-permission: §c你没有使用公会功能的权限！
+broadcast:
+  checkin: '&8[&b公会&8] &e{player} &a完成了今日公会签到，公会增加 &e{prosperity} &a点繁荣度！'
+  donate: '&8[&b公会&8] &e{player} &a向公会捐献了 &e{amount} H币&a，繁荣度增加 &e{amount}&a！'
+  promote: '&8[&b公会&8] &a成员 &e{player} &a被晋升到 {role}&a！'
+  demote: '&8[&b公会&8] &6成员 &e{player} &6被降职到 {role}&6！'
+  kick: '&8[&b公会&8] &c成员 &e{player} &c已被移出公会！'
+  leave: '&8[&b公会&8] &e{player} &7退出了公会。'
+  disband: '&8[&b公会&8] &c公会已被会长解散！'
+  transfer: '&8[&b公会&8] &6会长已将公会转让给 &e{player}&6！原会长已自动调整为副会长。'
+  join: '&8[&b公会&8] &a欢迎新成员 &e{player} &a加入公会！'
+  icon: '&8[&b公会&8] &a会长将公会展示图标修改为了 &e{icon}&a！'
+  upgrade: "&8[&b公会&8] &6公会升级成功，已达到 &eLv.{level}&6！"
+  base: "&8[&b公会&8] &e{player} &a更新了公会基地，成员可从公会菜单前往。"
+  reward: "&8[&b公会&8] &e{player} &a领取了公会 &eLv.{level} &a升级奖励。"
+admin:
+  no-permission: '&c你没有权限执行该公会管理指令！'
+  reload-success: '&a公会配置文件、等级与商城配置已成功重载！'
+  resetcheckin-usage: '&6用法：&e/guild admin resetcheckin <玩家名>'
+  resetcheckin-success: '&a已成功重置玩家 &e{player} &a的今日公会签到状态！'
+  resetcheckin-failed: '&c重置失败！未找到玩家“&e{player}&c”的信息。'
+  clearcooldown-usage: '&6用法：&e/guild admin clearcooldown <玩家名>'
+  clearcooldown-success: '&a已成功清空玩家 &e{player} &a的退出公会冷却时间！'
+  clearcooldown-failed: '&c清除失败！未找到玩家“&e{player}&c”的信息。'
+  setxp-usage: '&6用法：&e/guild admin setxp <公会名> <累计繁荣度>'
+  setxp-negative: '&c累计繁荣度数值必须大于等于0！'
+  setxp-success: '&a成功将公会 &e{guild} &a的累计繁荣度设为 &e{xp}&a，当前公会等级自动调整为 &eLv.{level}&a！'
+  setxp-failed: '&c未找到名称为 &e{guild} &c的公会！'
+  unknown: '&c未知管理指令，请输入 &e/guild admin &c查看帮助。'
+shop-menu:
+  title: '&3公会商城 - {role}'
+  limit-unlimited: '&a不限购'
+  limit-format: '&6{type} 限额: &e{remaining}/{limit} &7(已购 {bought})'
+  action-can-buy: '&a[点击直接购买 1 件]'
+  action-no-perm: '&c[你当前的公会职位等级未解锁该商品]'
+  item-lore:
+    - '&7-----------------------------'
+    - '&f价格: &e{price} H币'
+    - '&f限购: {limit}'
+    - '&7-----------------------------'
+    - '{action}'
+  default-item-name: "&e{id}"
+  limit-types:
+    unlimited: UNLIMITED
+    daily: DAILY
+    weekly: WEEKLY
+    monthly: MONTHLY
+commands:
+  metadata:
+    guild:
+      description: '公会管理'
+      usage: '/guild help'
+    gc:
+      description: '公会聊天频道'
+      usage: '/gc <消息>'
+    gshop:
+      description: '公会商城商品与限购查询'
+      usage: '/gshop [list|check|buy <商品ID> [数量]]'
+  shop-item-separator: ', '
+  help:
+    - "&e/guild &7- 打开公会主面板 GUI"
+    - "&e/guild info &7- 查看当前公会信息"
+    - "&e/guild checkin &7- 每日公会签到"
+    - "&e/guild donate [数量] &7- 为公会捐献 H币 (1H币=1繁荣度)"
+    - "&e/guild create <名称> &7- 创建全新公会"
+    - "&e/guild join <名称> &7- 申请加入指定公会"
+    - "&e/guild apply [名称] &7- 申请加入公会 / 浏览公会列表"
+    - "&e/guild members &7- 查看公会成员列表"
+    - "&e/guild invite <玩家名> &7- 邀请玩家加入公会 (长老及以上)"
+    - "&e/guild accept &7- 接受公会入会邀请"
+    - "&e/guild deny &7- 拒绝公会入会邀请"
+    - "&e/gc <消息> &7- 公会跨服聊天频道"
+    - "&e/guild transfer [玩家名] &7- 会长转让公会"
+    - "&e/guild promote <玩家名> &7- 晋升公会成员职位"
+    - "&e/guild demote <玩家名> &7- 降低公会成员职位"
+    - "&e/guild kick <玩家名> &7- 将成员踢出公会"
+    - "&e/guild leave &7- 退出当前公会"
+    - "&e/guild disband &7- 会长解散公会"
+  help-admin:
+    - "&b/guild reload &7- 重载公会所有配置文件"
+    - "&b/guild admin &7- 查看 OP/Debug 管理员指令"
+  admin-help:
+    - "&e/guild admin reload &7- 重载公会配置与商城"
+    - "&e/guild admin resetcheckin <玩家名或UUID> &7- 跨服重置该玩家今日签到"
+    - "&e/guild admin clearcooldown <玩家名或UUID> &7- 跨服清空该玩家的退会冷却时间"
+    - "&e/guild admin setxp <公会名> <繁荣度> &7- 设置公会繁荣度 (自动触发升降级)"
+    - "&e/guild admin refreshshop &7- 跨服刷新/重置所有公会商店限购"
+  admin-operation-failed: "&c管理操作失败，数据未确认保存，请检查服务器日志后重试。"
+  no-permission: "&c你没有使用公会功能的权限！"
+  reload-no-permission: "&c你没有权限执行重载指令！"
+  reloaded: "&a公会配置文件、等级与商城配置已成功重载！"
+  usage-create: "&6用法：&e/guild create <公会名称>"
+  create-cooldown: "&c你刚退出公会不久，尚在冷却期内（剩余约 &e{hours} &c小时），暂时无法创建公会！"
+  apply-cooldown: "&c你刚退出公会不久，尚在冷却期内（剩余约 &e{hours} &c小时），暂时无法申请加入公会！"
+  checkin-success: "&a今日公会签到成功！公会增加 &e{prosperity} &a点繁荣度，获得奖励 &e{amount} 个粗金矿石&a！"
+  usage-promote: "&6用法：&e/guild promote <玩家名>"
+  promoted: "&a成功将成员 &e{player} &a晋升为 &f{role}&a！"
+  usage-demote: "&6用法：&e/guild demote <玩家名>"
+  demoted: "&6已将成员 &e{player} &6降职为 &f{role}&6！"
+  usage-kick: "&6用法：&e/guild kick <玩家名>"
+  usage-invite: "&6用法：&e/guild invite <玩家名>"
+  player-not-found: "&c未找到玩家“{player}”！"
+  invite-save-failed: "&c邀请保存失败，请检查数据库后重试。"
+  operation-failed: "&c操作失败，数据未确认保存，请检查服务器日志后重试。"
+  help-title: "&6===== FreeCore 公会系统帮助 ====="
+  admin-no-permission: "&c你没有权限执行该公会管理指令！"
+  admin-help-title: "&6=== 公会 OP/Debug 管理指令 ==="
+  admin-usage-action: "&6用法：&e/guild admin {sub} {action} <玩家名或UUID>"
+  admin-usage-resetcheckin: "&6用法：&e/guild admin resetcheckin <玩家名或UUID>"
+  admin-checkin-reset: "&a已成功重置玩家 &e{player} &a的今日公会签到状态！"
+  admin-checkin-reset-failed: "&c重置失败！玩家“&e{player}&c”未加入公会、无法解析或数据库保存失败，请检查日志。"
+  admin-usage-clearcooldown: "&6用法：&e/guild admin clearcooldown <玩家名或UUID>"
+  admin-cooldown-cleared: "&a已成功清空玩家 &e{player} &a的退出公会冷却时间！"
+  admin-cooldown-clear-failed: "&c清除失败！无法解析玩家“&e{player}&c”或数据库保存失败，请检查日志。"
+  admin-usage-setxp: "&6用法：&e/guild admin setxp <公会名> <繁荣度>"
+  admin-prosperity-invalid: "&c繁荣度数值必须大于等于0！"
+  admin-prosperity-set: "&a成功将公会 &e{guild} &a的繁荣度设为 &e{xp}&a，当前公会等级自动调整为 &eLv.{newLvl}&a！"
+  admin-prosperity-set-failed: "&c设置失败：未找到公会 &e{guild} &c或数据库保存失败，请检查日志。"
+  admin-unknown: "&c未知管理指令，请输入 &e/guild admin &c查看帮助。"
+  shop-player-only: 仅玩家可用
+  shop-list: "&b公会商店商品：{items}"
+  shop-usage-action: "用法: /gshop {action} <商品ID> [数量]"
+  shop-usage: "用法: /gshop [list|check|buy <商品ID> [数量]]"
+  shop-success: "&a{message}"
+  shop-failure: "&c{message}"
+results:
+  invalid-player: 玩家参数无效
+  apply:
+    empty-name: 公会名称不能为空
+    already-member: 你已经加入了公会，无法申请其他公会！
+    cooldown: 你尚处于退会冷却期（剩余约 {hours} 小时），暂无法申请！
+    guild-not-found: 未找到名为“{guild}”的公会！
+    full: "该公会成员人数已满（当前上限: {max} 人）！"
+    pending: 你已经向该公会提交过申请，正在等待管理人员审核！
+    success: 申请提交成功
+  checkin:
+    no-guild: 你不属于任何公会
+    already: 你今日已签到
+    overflow: 繁荣度数据超出上限
+    success: 签到成功
+    guild-missing: 公会已不存在
+    save-failed: 数据库保存失败，请稍后重试
+  promote:
+    empty-role: 目标职位不能为空
+    self: 不能对自己进行职位调整
+    no-guild: 你未加入任何公会
+    other-guild: 该玩家不属于你所在的公会
+    rank: 你的职位权限不足以对同级或更高级成员进行晋升
+    elder-full: 公会长老职位名额已满（当前已任职 {curElders}/{maxElders} 人，提升公会等级可扩充配额）
+    success: 晋升成功
+    vice-restriction: 副会长只能将成员晋升至长老职位
+    not-higher: 目标职位必须高于该成员当前的职位
+    president-restriction: 会长职位不可直接晋升，请使用会长转让功能
+    role-full: "该职位配额已满（{role} 席位: {curCount}/{maxQuota} 人，提升公会等级可解锁更多配额）"
+    no-permission: 你的公会职位无权进行晋升操作
+  transfer:
+    invalid-target: 目标玩家无效！
+    self: 无法转让给自己！
+    no-guild: 你当前不属于任何公会！
+    no-permission: 只有公会会长才能发起转让操作！
+    other-guild: 目标玩家不属于本公会！
+    success: 转让成功
+  shop:
+    invalid-amount: 数量必须大于零
+    missing-offer: 商品或该层级配置不存在
+    unlimited: 不限购
+    allowed: 可购买
+    limit-exceeded: 超过限购，剩余 {remaining}
+    invalid-price: 商品价格配置无效
+    invalid-total-price: 商品价格配置无效！
+    no-economy: 服务器经济服务异常，请联系管理员！
+    insufficient-funds: 你的 H 币余额不足！（需要 {cost} H币，当前余额 {balance} H币）
+    withdraw-failed: 扣除 H 币失败，请重试！
+    success: 购买成功
+    delivery-failed: 发放商品失败，请稍后重试
+    offline: 玩家不在线
+  invalid-player-short: 玩家无效
+members:
+  no-checkin: 无
+chat:
+  player-only: "&c只有玩家可以使用公会聊天频道！"
+  no-guild: "&c你当前未加入任何公会，无法在公会频道发言！"
+  usage: "&6用法：&e/gc <消息内容>"
+  format: "&8[&b公会聊天&8] &7[{role}&7] &f{player}&7: &f{msg}"
+placeholders:
+  no-guild: 无公会
+roles:
+  member:
+    chat: "&0成员"
+    menu: "&7成员"
+  elder:
+    chat: "&a长老"
+    menu: "&a长老"
+  vice_president:
+    chat: "&9副会长"
+    menu: "&b副会长"
+  president:
+    chat: "&c会长"
+    menu: "&c会长"

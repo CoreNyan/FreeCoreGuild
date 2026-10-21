@@ -1,5 +1,7 @@
 package io.github.freecoreguild.api;
 
+import io.github.freecoreguild.lang.Lang;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -15,25 +17,17 @@ public interface GuildProvider {
     boolean releaseFakePlayer(UUID operator, String identifier);
 
     enum Role {
-        MEMBER("§0成员", "§7成员"),
-        ELDER("§a长老", "§a长老"),
-        VICE_PRESIDENT("§9副会长", "§b副会长"),
-        PRESIDENT("§c会长", "§c会长");
-
-        private final String chatDisplay;
-        private final String menuDisplay;
-
-        Role(String chatDisplay, String menuDisplay) {
-            this.chatDisplay = chatDisplay;
-            this.menuDisplay = menuDisplay;
-        }
+        MEMBER,
+        ELDER,
+        VICE_PRESIDENT,
+        PRESIDENT;
 
         public String getChatDisplay() {
-            return chatDisplay;
+            return Lang.text("roles." + name().toLowerCase(java.util.Locale.ROOT) + ".chat");
         }
 
         public String getMenuDisplay() {
-            return menuDisplay;
+            return Lang.text("roles." + name().toLowerCase(java.util.Locale.ROOT) + ".menu");
         }
 
         public boolean canOperateFakePlayers() {
@@ -41,5 +35,23 @@ public interface GuildProvider {
         }
     }
 
-    record GuildView(String name, UUID owner, int level, long xp, int members, int maxMembers) {}
+    record GuildView(
+            String name,
+            UUID owner,
+            int level,
+            long xp,
+            int members,
+            int maxMembers,
+            String icon,
+            List<String> presidents,
+            long createdAt
+    ) {
+        public GuildView(String name, UUID owner, int level, long xp, int members, int maxMembers, String icon) {
+            this(name, owner, level, xp, members, maxMembers, icon, List.of(), 0L);
+        }
+
+        public GuildView(String name, UUID owner, int level, long xp, int members, int maxMembers) {
+            this(name, owner, level, xp, members, maxMembers, "WHITE_BANNER", List.of(), 0L);
+        }
+    }
 }

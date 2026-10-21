@@ -30,15 +30,35 @@ public final class MySqlFakePlayerStore {
         if (guildId <= 0 || slot < 0 || identifier == null || identifier.isBlank()) return false;
         String sql = "INSERT INTO fc_guild_fakeplayers (guild_id, slot, identifier, active) VALUES (?, ?, ?, ?) "
                 + "ON DUPLICATE KEY UPDATE identifier=VALUES(identifier), active=VALUES(active)";
-        try (Connection c = dataSource.getConnection(); PreparedStatement p = c.prepareStatement(sql)) {
-            p.setLong(1, guildId);
-            p.setInt(2, slot);
-            p.setString(3, identifier);
-            p.setInt(4, active ? 1 : 0);
-            return p.executeUpdate() > 0;
+        boolean committed = false;
+        boolean changed = false;
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try {
+                // Share the disband parent lock: a delayed upsert cannot resurrect deleted slots.
+                try (PreparedStatement p = c.prepareStatement("SELECT id FROM fc_guilds WHERE id = ? FOR UPDATE")) {
+                    p.setLong(1, guildId);
+                    try (ResultSet r = p.executeQuery()) {
+                        if (!r.next()) { c.rollback(); return false; }
+                    }
+                }
+                try (PreparedStatement p = c.prepareStatement(sql)) {
+                    p.setLong(1, guildId);
+                    p.setInt(2, slot);
+                    p.setString(3, identifier);
+                    p.setInt(4, active ? 1 : 0);
+                    changed = p.executeUpdate() > 0;
+                }
+                c.commit();
+                committed = true;
+            } catch (SQLException e) {
+                try { c.rollback(); } catch (SQLException rollbackError) { e.addSuppressed(rollbackError); }
+                throw e;
+            }
         } catch (SQLException e) {
-            throw new IllegalStateException("FakePlayer record failed", e);
+            if (!committed) throw new IllegalStateException("FakePlayer record failed", e);
         }
+        return changed;
     }
 
     public boolean delete(long guildId, int slot) {

@@ -48,7 +48,7 @@ public final class GuildBaseTransferService implements Listener {
             // 同服传送
             World world = Bukkit.getWorld(base.world());
             if (world == null) {
-                player.sendMessage(Lang.getPrefix() + "§c公会基地所在世界尚未加载！");
+                player.sendMessage(Lang.getPrefix() + Lang.text("messages.base-world-unloaded"));
                 return;
             }
             Location targetLoc = new Location(world, base.x(), base.y(), base.z(), base.yaw(), base.pitch());

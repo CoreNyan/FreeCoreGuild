@@ -1,5 +1,6 @@
 package io.github.freecoreguild;
 
+import io.github.freecoreguild.lang.Lang;
 import io.github.freecoreguild.service.GuildService;
 import net.milkbowl.vault.economy.Economy;
 import org.bukkit.entity.Player;
@@ -39,28 +40,51 @@ public final class EconomyGateway {
      * @return 返回是否捐献成功
      */
     public boolean donate(Player player, double coins) {
-        if (coins <= 0 || !validCost(coins) || !validCost(prosperityPerCoin)) return false;
-        if (!withdraw(player, coins)) return false;
-
-        long prosperity;
+        long prosperity = prosperityFor(coins);
+        if (prosperity <= 0) return false;
+        var before = guilds.guildOf(player.getUniqueId());
+        if (before.isEmpty() || !withdraw(player, coins)) return false;
+        int upgraded;
         try {
-            prosperity = Math.round(coins * prosperityPerCoin);
+            upgraded = guilds.donateAndCheckAutoUpgrade(player.getUniqueId(), prosperity);
         } catch (RuntimeException ex) {
             refund(player, coins);
+            org.bukkit.Bukkit.getLogger().warning("[FreeCoreGuild] Donation persistence failed; refund requested.");
             return false;
         }
-
-        if (prosperity <= 0) {
-            refund(player, coins);
-            return false;
-        }
-
-        int upgraded = guilds.donateAndCheckAutoUpgrade(player.getUniqueId(), prosperity);
         if (upgraded < 0) {
             refund(player, coins);
             return false;
         }
+        // Money/prosperity is already committed: notification errors must not refund it.
+        FreeCoreGuildPlugin plugin = FreeCoreGuildPlugin.getInstance();
+        if (plugin != null) {
+            try {
+                plugin.broadcastGuildCross(before.get().name(),
+                        io.github.freecoreguild.lang.Lang.text("broadcast.donate",
+                                "player", player.getName(), "amount", java.math.BigDecimal.valueOf(coins).stripTrailingZeros().toPlainString(),
+                                "prosperity", String.valueOf(prosperity)));
+                if (upgraded > 0) plugin.broadcastGuildCross(before.get().name(),
+                        io.github.freecoreguild.lang.Lang.text("broadcast.upgrade",
+                                "level", String.valueOf(upgraded)));
+            } catch (RuntimeException ex) {
+                org.bukkit.Bukkit.getLogger().warning("[FreeCoreGuild] Donation committed, but member notification failed.");
+            }
+            try {
+                plugin.refreshGuildMenus();
+                if (plugin.getRedisBridge() != null) plugin.getRedisBridge().publish("SYNC_ALL|||");
+            } catch (RuntimeException ex) {
+                org.bukkit.Bukkit.getLogger().warning("[FreeCoreGuild] Donation committed, but menu synchronization failed.");
+            }
+        }
         return true;
+    }
+
+    public long prosperityFor(double coins) {
+        if (!validCost(coins) || !validCost(prosperityPerCoin)) return -1;
+        double value = coins * prosperityPerCoin;
+        if (!Double.isFinite(value) || value >= Long.MAX_VALUE) return -1;
+        return Math.round(value);
     }
 
     public boolean withdraw(Player player, double amount) {
@@ -72,7 +96,12 @@ public final class EconomyGateway {
     }
 
     public void refund(Player player, double amount) {
-        try { economy.depositPlayer(player, amount); } catch (RuntimeException ignored) { }
+        try {
+            var response = economy.depositPlayer(player, amount);
+            if (response != null && response.transactionSuccess()) return;
+        } catch (RuntimeException ignored) { }
+        org.bukkit.Bukkit.getLogger().severe("[FreeCoreGuild] REFUND FAILED: player=" + player.getUniqueId() + ", amount=" + amount);
+        player.sendMessage(Lang.text("messages.refund-failed"));
     }
 
     public void deposit(Player player, double amount) {

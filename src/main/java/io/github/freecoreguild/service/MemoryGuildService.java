@@ -1,5 +1,6 @@
 package io.github.freecoreguild.service;
 
+import io.github.freecoreguild.lang.Lang;
 import io.github.freecoreguild.api.GuildProvider;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -72,7 +73,7 @@ public class MemoryGuildService implements GuildService {
 
     @Override public boolean resetCheckinTodayByName(String playerName) {
         UUID uid = resolvePlayerUuid(playerName);
-        if (uid != null) {
+        if (uid != null && guildFor(uid) != null) {
             resetCheckinToday(uid);
             return true;
         }
@@ -81,15 +82,27 @@ public class MemoryGuildService implements GuildService {
 
     @Override public UUID resolvePlayerUuid(String playerName) {
         if (playerName == null || playerName.isBlank()) return null;
-        org.bukkit.entity.Player online = Bukkit.getPlayerExact(playerName);
-        if (online != null) return online.getUniqueId();
-        OfflinePlayer op = Bukkit.getOfflinePlayer(playerName);
-        if (op.hasPlayedBefore() || op.isOnline()) return op.getUniqueId();
+        playerName = playerName.trim();
+        // UUIDs are explicit identifiers; never synthesize an offline UUID from an unknown name.
+        if (playerName.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+            return UUID.fromString(playerName);
+        }
+        for (org.bukkit.entity.Player online : Bukkit.getOnlinePlayers()) {
+            if (online.getName().equalsIgnoreCase(playerName)) {
+                return online.getUniqueId();
+            }
+        }
+        for (OfflinePlayer op : Bukkit.getOfflinePlayers()) {
+            if (op.getName() != null && op.getName().equalsIgnoreCase(playerName)) {
+                return op.getUniqueId();
+            }
+        }
         return null;
     }
 
     @Override public synchronized boolean joinDirectly(UUID player, String guildName) {
         if (player == null || guildName == null || members.containsKey(player)) return false;
+        if (getLeaveCooldownRemainingMillis(player) > 0) return false;
         Guild g = guilds.get(guildName.trim().toLowerCase(Locale.ROOT));
         if (g == null) return false;
         synchronized (g) {
@@ -133,14 +146,31 @@ public class MemoryGuildService implements GuildService {
     }
 
     @Override public synchronized boolean apply(UUID player, String guildName) {
-        if (player == null || guildName == null || members.containsKey(player)) return false;
-        if (getLeaveCooldownRemainingMillis(player) > 0) return false;
+        return applyWithReason(player, guildName).success();
+    }
+
+    @Override public synchronized ApplyResult applyWithReason(UUID player, String guildName) {
+        if (player == null) return new ApplyResult(false, Lang.text("results.invalid-player"));
+        if (guildName == null || guildName.isBlank()) return new ApplyResult(false, Lang.text("results.apply.empty-name"));
+        if (members.containsKey(player)) return new ApplyResult(false, Lang.text("results.apply.already-member"));
+        long cd = getLeaveCooldownRemainingMillis(player);
+        if (cd > 0) {
+            long hours = (cd / 3600_000L) + 1;
+            return new ApplyResult(false, Lang.text("results.apply.cooldown", "hours", String.valueOf(hours)));
+        }
         Guild g = guilds.get(guildName.trim().toLowerCase(Locale.ROOT));
-        if (g == null) return false;
+        if (g == null) return new ApplyResult(false, Lang.text("results.apply.guild-not-found", "guild", String.valueOf(guildName)));
         synchronized (g) {
-            if (g.memberCount >= level(g.level).maxMembers()) return false;
+            if (g.memberCount >= level(g.level).maxMembers()) {
+                return new ApplyResult(false, Lang.text("results.apply.full", "max", String.valueOf(level(g.level).maxMembers())));
+            }
+            Set<UUID> apps = applications.computeIfAbsent(g.key, k -> ConcurrentHashMap.newKeySet());
+            if (apps.contains(player)) {
+                return new ApplyResult(false, Lang.text("results.apply.pending"));
+            }
             for (Set<UUID> pending : applications.values()) pending.remove(player);
-            return applications.computeIfAbsent(g.key, k -> ConcurrentHashMap.newKeySet()).add(player);
+            apps.add(player);
+            return new ApplyResult(true, Lang.text("results.apply.success"));
         }
     }
 
@@ -194,7 +224,7 @@ public class MemoryGuildService implements GuildService {
         synchronized (g) {
             LevelConfig level = level(g.level);
             return Optional.of(new GuildView(g.name, g.owner, g.level, g.xp,
-                    g.memberCount, level.maxMembers()));
+                    g.memberCount, level.maxMembers(), g.icon, List.of(), g.createdAt));
         }
     }
 
@@ -203,10 +233,34 @@ public class MemoryGuildService implements GuildService {
         for (Guild g : guilds.values()) {
             synchronized (g) {
                 LevelConfig level = level(g.level);
-                list.add(new GuildView(g.name, g.owner, g.level, g.xp, g.memberCount, level.maxMembers()));
+                List<String> presList = new ArrayList<>();
+                if (g.owner != null) {
+                    OfflinePlayer op = Bukkit.getOfflinePlayer(g.owner);
+                    if (op != null && op.getName() != null) presList.add(op.getName());
+                }
+                for (Map.Entry<UUID, Role> e : g.roles.entrySet()) {
+                    if (e.getValue() == Role.PRESIDENT && !e.getKey().equals(g.owner)) {
+                        OfflinePlayer op = Bukkit.getOfflinePlayer(e.getKey());
+                        if (op != null && op.getName() != null && !presList.contains(op.getName())) {
+                            presList.add(op.getName());
+                        }
+                    }
+                }
+                list.add(new GuildView(g.name, g.owner, g.level, g.xp, g.memberCount, level.maxMembers(), g.icon, presList, g.createdAt));
             }
         }
         return list;
+    }
+
+    @Override public boolean setGuildIcon(UUID operator, String iconMaterial) {
+        if (operator == null || iconMaterial == null) return false;
+        Guild g = guildFor(operator);
+        if (g == null) return false;
+        synchronized (g) {
+            if (rank(g, operator) != Role.PRESIDENT) return false;
+            g.icon = iconMaterial.toUpperCase(Locale.ROOT);
+            return true;
+        }
     }
 
     @Override public List<MemberInfo> getMembers(UUID player) {
@@ -216,14 +270,14 @@ public class MemoryGuildService implements GuildService {
         synchronized (g) {
             OfflinePlayer ownerP = Bukkit.getOfflinePlayer(g.owner);
             String ownerName = ownerP.getName() != null ? ownerP.getName() : g.owner.toString().substring(0, 8);
-            String lastCheckinOwner = g.checkins.containsKey(g.owner) ? g.checkins.get(g.owner).toString() : "无";
+            String lastCheckinOwner = g.checkins.containsKey(g.owner) ? g.checkins.get(g.owner).toString() : Lang.text("members.no-checkin");
             list.add(new MemberInfo(g.owner, ownerName, Role.PRESIDENT, g.contributions.getOrDefault(g.owner, 0L), lastCheckinOwner));
 
             for (Map.Entry<UUID, Role> e : g.roles.entrySet()) {
                 if (e.getKey().equals(g.owner)) continue;
                 OfflinePlayer op = Bukkit.getOfflinePlayer(e.getKey());
                 String pName = op.getName() != null ? op.getName() : e.getKey().toString().substring(0, 8);
-                String lastCheckin = g.checkins.containsKey(e.getKey()) ? g.checkins.get(e.getKey()).toString() : "无";
+                String lastCheckin = g.checkins.containsKey(e.getKey()) ? g.checkins.get(e.getKey()).toString() : Lang.text("members.no-checkin");
                 list.add(new MemberInfo(e.getKey(), pName, e.getValue(), g.contributions.getOrDefault(e.getKey(), 0L), lastCheckin));
             }
         }
@@ -320,56 +374,88 @@ public class MemoryGuildService implements GuildService {
         synchronized (g) { return g.fakePlayers.remove(identifier); }
     }
 
+    @Override public boolean hasCheckedInToday(UUID player) {
+        Guild g = guildFor(player);
+        if (g == null) return false;
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
+        synchronized (g) {
+            return today.equals(g.checkins.get(player));
+        }
+    }
+
     @Override public CheckinResult checkinPlayer(UUID player) {
         Guild g = guildFor(player);
-        if (g == null) return new CheckinResult(false, "你不属于任何公会", 0, 0, 0);
+        if (g == null) return new CheckinResult(false, Lang.text("results.checkin.no-guild"), 0, 0, 0);
         LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
         synchronized (g) {
             if (today.equals(g.checkins.get(player))) {
-                return new CheckinResult(false, "你今日已签到", 0, 0, 0);
+                return new CheckinResult(false, Lang.text("results.checkin.already"), 0, 0, 0);
             }
-            g.checkins.put(player, today);
-
             DayOfWeek dow = today.getDayOfWeek();
             boolean isWeekend = (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY);
             long prosperity = isWeekend ? 3000L : 1000L;
             int goldAmount = isWeekend ? 30 : 10;
+            long newProsperity;
+            long newContribution;
+            try {
+                newProsperity = Math.addExact(g.xp, prosperity);
+                newContribution = Math.addExact(g.contributions.getOrDefault(player, 0L), prosperity);
+            } catch (ArithmeticException overflow) {
+                return new CheckinResult(false, Lang.text("results.checkin.overflow"), 0, 0, 0);
+            }
 
-            g.xp += prosperity;
-            g.contributions.merge(player, prosperity, Long::sum);
-
+            g.xp = newProsperity;
+            g.contributions.put(player, newContribution);
+            g.checkins.put(player, today);
             checkAutoUpgrade(g);
-            return new CheckinResult(true, "签到成功", 0.0, prosperity, goldAmount);
+            return new CheckinResult(true, Lang.text("results.checkin.success"), 0.0, prosperity, goldAmount);
         }
     }
 
     @Override public boolean promote(UUID operator, UUID target, Role requested) {
-        if (requested == null || operator == null || target == null || operator.equals(target)) return false;
+        return promoteWithReason(operator, target, requested).success();
+    }
+
+    @Override public PromoteResult promoteWithReason(UUID operator, UUID target, Role requested) {
+        if (requested == null) return new PromoteResult(false, Lang.text("results.promote.empty-role"), null);
+        if (operator == null || target == null) return new PromoteResult(false, Lang.text("results.invalid-player"), null);
+        if (operator.equals(target)) return new PromoteResult(false, Lang.text("results.promote.self"), null);
         Guild g = guildFor(operator);
-        if (g == null || g != guildFor(target)) return false;
+        if (g == null) return new PromoteResult(false, Lang.text("results.promote.no-guild"), null);
+        if (g != guildFor(target)) return new PromoteResult(false, Lang.text("results.promote.other-guild"), null);
         synchronized (g) {
             Role actor = rank(g, operator), current = rank(g, target);
+            if (actor.ordinal() <= current.ordinal()) {
+                return new PromoteResult(false, Lang.text("results.promote.rank"), null);
+            }
             if (actor == Role.VICE_PRESIDENT) {
                 if (current == Role.MEMBER && requested == Role.ELDER) {
-                    if (countRole(g, Role.ELDER) >= quota(g, Role.ELDER)) return false;
+                    int maxElders = quota(g, Role.ELDER);
+                    int curElders = countRole(g, Role.ELDER);
+                    if (curElders >= maxElders) {
+                        return new PromoteResult(false, Lang.text("results.promote.elder-full", "curElders", String.valueOf(curElders), "maxElders", String.valueOf(maxElders)), null);
+                    }
                     g.roles.put(target, Role.ELDER);
-                    return true;
+                    return new PromoteResult(true, Lang.text("results.promote.success"), Role.ELDER);
                 }
-                if (current == Role.ELDER && requested == Role.VICE_PRESIDENT) {
-                    if (countRole(g, Role.VICE_PRESIDENT) >= quota(g, Role.VICE_PRESIDENT)) return false;
-                    g.roles.put(target, Role.VICE_PRESIDENT);
-                    return true;
-                }
-                return false;
+                return new PromoteResult(false, Lang.text("results.promote.vice-restriction"), null);
             }
             if (actor == Role.PRESIDENT) {
-                if (requested.ordinal() <= current.ordinal()) return false;
-                if (requested == Role.PRESIDENT && current != Role.VICE_PRESIDENT) return false;
-                if (countRole(g, requested) >= quota(g, requested)) return false;
+                if (requested.ordinal() <= current.ordinal()) {
+                    return new PromoteResult(false, Lang.text("results.promote.not-higher"), null);
+                }
+                if (requested == Role.PRESIDENT) {
+                    return new PromoteResult(false, Lang.text("results.promote.president-restriction"), null);
+                }
+                int maxQuota = quota(g, requested);
+                int curCount = countRole(g, requested);
+                if (curCount >= maxQuota) {
+                    return new PromoteResult(false, Lang.text("results.promote.role-full", "role", String.valueOf(requested.getMenuDisplay()), "curCount", String.valueOf(curCount), "maxQuota", String.valueOf(maxQuota)), null);
+                }
                 g.roles.put(target, requested);
-                return true;
+                return new PromoteResult(true, Lang.text("results.promote.success"), requested);
             }
-            return false;
+            return new PromoteResult(false, Lang.text("results.promote.no-permission"), null);
         }
     }
 
@@ -402,23 +488,23 @@ public class MemoryGuildService implements GuildService {
     }
 
     @Override public TransferResult transferWithReason(UUID operator, UUID target) {
-        if (operator == null || target == null) return new TransferResult(false, "目标玩家无效！");
-        if (operator.equals(target)) return new TransferResult(false, "无法转让给自己！");
+        if (operator == null || target == null) return new TransferResult(false, Lang.text("results.transfer.invalid-target"));
+        if (operator.equals(target)) return new TransferResult(false, Lang.text("results.transfer.self"));
         synchronized (this) {
             Guild g = guildFor(operator);
-            if (g == null) return new TransferResult(false, "你当前不属于任何公会！");
+            if (g == null) return new TransferResult(false, Lang.text("results.transfer.no-guild"));
             if (rank(g, operator) != Role.PRESIDENT && !g.owner.equals(operator)) {
-                return new TransferResult(false, "只有公会会长才能发起转让操作！");
+                return new TransferResult(false, Lang.text("results.transfer.no-permission"));
             }
             if (g != guildFor(target)) {
-                return new TransferResult(false, "目标玩家不属于本公会！");
+                return new TransferResult(false, Lang.text("results.transfer.other-guild"));
             }
             synchronized (g) {
                 g.roles.remove(target);
                 UUID previousOwner = g.owner;
                 g.owner = target;
                 g.roles.put(previousOwner, Role.VICE_PRESIDENT);
-                return new TransferResult(true, "转让成功");
+                return new TransferResult(true, Lang.text("results.transfer.success"));
             }
         }
     }
@@ -465,13 +551,19 @@ public class MemoryGuildService implements GuildService {
     }
 
     @Override public int donateAndCheckAutoUpgrade(UUID player, long prosperityToAdd) {
-        if (prosperityToAdd <= 0) return 0;
+        if (prosperityToAdd <= 0) return -1;
         Guild g = guildFor(player);
-        if (g == null) return 0;
+        if (g == null) return -1;
         synchronized (g) {
-            g.xp += prosperityToAdd;
-            g.contributions.merge(player, prosperityToAdd, Long::sum);
-            return checkAutoUpgrade(g);
+            try {
+                long newXp = Math.addExact(g.xp, prosperityToAdd);
+                long newContribution = Math.addExact(g.contributions.getOrDefault(player, 0L), prosperityToAdd);
+                g.xp = newXp;
+                g.contributions.put(player, newContribution);
+                return checkAutoUpgrade(g);
+            } catch (ArithmeticException e) {
+                return -1;
+            }
         }
     }
 
@@ -482,10 +574,9 @@ public class MemoryGuildService implements GuildService {
             if (next == null) break;
             long required = next.getValue().requiredXp();
             if (g.xp >= required) {
-                g.xp -= required;
                 g.level = next.getKey();
                 upgradedTo = g.level;
-                broadcastGuild(g, "§6§lFreeCore §f§l>>> §a§l公会繁荣度已达标，已自动升至 §e§lLv." + g.level + " §a§l！");
+
             } else {
                 break;
             }
@@ -522,6 +613,58 @@ public class MemoryGuildService implements GuildService {
         }
     }
 
+    private final Map<UUID, Map<String, GuildInvite>> memoryInvites = new ConcurrentHashMap<>();
+
+    @Override public synchronized boolean addInvite(UUID targetPlayer, String guildName, String inviterName) {
+        if (targetPlayer == null || guildName == null || guildName.isBlank() || inviterName == null) return false;
+        long expireAt = System.currentTimeMillis() + INVITE_TTL_MILLIS;
+        memoryInvites.computeIfAbsent(targetPlayer, k -> new ConcurrentHashMap<>())
+                .put(guildName.trim().toLowerCase(Locale.ROOT), new GuildInvite(guildName.trim(), inviterName, expireAt));
+        return true;
+    }
+
+    @Override public synchronized boolean acceptInvite(UUID targetPlayer, String guildName) {
+        if (!hasInvite(targetPlayer, guildName) || !joinDirectly(targetPlayer, guildName)) return false;
+        clearAllInvitesFor(targetPlayer);
+        return true;
+    }
+
+    @Override public List<GuildInvite> getInvitesFor(UUID targetPlayer) {
+        if (targetPlayer == null) return List.of();
+        Map<String, GuildInvite> map = memoryInvites.get(targetPlayer);
+        if (map == null) return List.of();
+        long now = System.currentTimeMillis();
+        map.entrySet().removeIf(e -> e.getValue().expireAt() <= now);
+        List<GuildInvite> invites = new ArrayList<>(map.values());
+        invites.sort(Comparator.comparingLong(GuildInvite::expireAt).reversed().thenComparing(GuildInvite::guildName));
+        return invites;
+    }
+
+    @Override public boolean hasInvite(UUID targetPlayer, String guildName) {
+        if (targetPlayer == null || guildName == null) return false;
+        Map<String, GuildInvite> map = memoryInvites.get(targetPlayer);
+        if (map == null) return false;
+        GuildInvite inv = map.get(guildName.toLowerCase(Locale.ROOT));
+        if (inv != null && inv.expireAt() > System.currentTimeMillis()) {
+            return true;
+        }
+        return false;
+    }
+
+    @Override public void removeInvite(UUID targetPlayer, String guildName) {
+        if (targetPlayer == null || guildName == null) return;
+        Map<String, GuildInvite> map = memoryInvites.get(targetPlayer);
+        if (map != null) {
+            map.remove(guildName.toLowerCase(Locale.ROOT));
+        }
+    }
+
+    @Override public void clearAllInvitesFor(UUID targetPlayer) {
+        if (targetPlayer != null) {
+            memoryInvites.remove(targetPlayer);
+        }
+    }
+
     @Override public boolean disband(UUID player) {
         synchronized (this) {
             Guild g = guildFor(player);
@@ -529,8 +672,13 @@ public class MemoryGuildService implements GuildService {
             guilds.remove(g.key, g);
             members.entrySet().removeIf(e -> e.getValue().equals(g.key));
             applications.remove(g.key);
+            removeGuildInvites(g.key);
             return true;
         }
+    }
+
+    protected void removeGuildInvites(String guildKey) {
+        for (Map<String, GuildInvite> invites : memoryInvites.values()) invites.remove(guildKey);
     }
 
     protected Role rank(Guild g, UUID player) {
@@ -563,14 +711,18 @@ public class MemoryGuildService implements GuildService {
     protected static final class Guild {
         final String key, name;
         UUID owner;
+        // Stable persistence identity; zero for an in-memory-only guild.
+        long databaseId;
         int level = 1;
         long xp = 0;
         int memberCount = 1;
+        long createdAt = System.currentTimeMillis();
         final Map<UUID, Role> roles = new HashMap<>();
         final Map<UUID, Long> contributions = new HashMap<>();
         final Map<UUID, LocalDate> checkins = new HashMap<>();
         final Set<String> fakePlayers = new HashSet<>();
         final Set<Integer> claimedUpgradeRewards = new HashSet<>();
+        String icon = "WHITE_BANNER";
         GuildBaseLocation baseLocation = null;
 
         Guild(String name, UUID owner) {

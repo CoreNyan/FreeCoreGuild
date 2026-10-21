@@ -8,6 +8,8 @@ public interface GuildService extends GuildProvider, AutoCloseable {
     void initialize();
     boolean create(UUID owner, String name);
     boolean apply(UUID player, String guildName);
+    ApplyResult applyWithReason(UUID player, String guildName);
+    record ApplyResult(boolean success, String reason) {}
     List<UUID> applications(UUID player);
     boolean approve(UUID operator, UUID applicant);
     boolean reject(UUID operator, UUID applicant);
@@ -17,9 +19,25 @@ public interface GuildService extends GuildProvider, AutoCloseable {
     default boolean checkin(UUID player) {
         return checkinPlayer(player).success();
     }
+    boolean hasCheckedInToday(UUID player);
+
+    /** 跨服邀请系统 (MySQL) */
+    long INVITE_TTL_MILLIS = 60_000L;
+    /** Returns true only after the invitation has been stored successfully. */
+    boolean addInvite(UUID targetPlayer, String guildName, String inviterName);
+    /** Checks a live invitation and consumes all invitations only after a successful join. */
+    boolean acceptInvite(UUID targetPlayer, String guildName);
+    List<GuildInvite> getInvitesFor(UUID targetPlayer);
+    boolean hasInvite(UUID targetPlayer, String guildName);
+    void removeInvite(UUID targetPlayer, String guildName);
+    void clearAllInvitesFor(UUID targetPlayer);
+
+    record GuildInvite(String guildName, String inviterName, long expireAt) {}
 
     /** 成员升职 */
     boolean promote(UUID operator, UUID target, io.github.freecoreguild.api.GuildProvider.Role role);
+    PromoteResult promoteWithReason(UUID operator, UUID target, io.github.freecoreguild.api.GuildProvider.Role role);
+    record PromoteResult(boolean success, String reason, io.github.freecoreguild.api.GuildProvider.Role newRole) {}
     default boolean promote(UUID operator, UUID target) {
         Optional<io.github.freecoreguild.api.GuildProvider.Role> current = roleOf(target);
         if (current.isEmpty()) return false;
@@ -50,6 +68,13 @@ public interface GuildService extends GuildProvider, AutoCloseable {
 
     boolean leave(UUID player);
     boolean disband(UUID player);
+    /** Bind a destructive confirmation to one guild incarnation, even when its name is reused. */
+    default long guildIdentity(UUID player) {
+        return guildOf(player).map(GuildView::createdAt).orElse(0L);
+    }
+    default boolean disband(UUID player, long expectedIdentity) {
+        return expectedIdentity != 0L && guildIdentity(player) == expectedIdentity && disband(player);
+    }
 
     /** 退出公会冷却检查 (返回剩余冷却毫秒数，0为无冷却) */
     long getLeaveCooldownRemainingMillis(UUID player);
@@ -66,6 +91,9 @@ public interface GuildService extends GuildProvider, AutoCloseable {
 
     /** 获取公会所有成员信息 */
     List<MemberInfo> getMembers(UUID player);
+
+    /** 修改公会图标物品材质名 */
+    boolean setGuildIcon(UUID operator, String iconMaterial);
 
     /** 获取所有公会列表 */
     List<GuildView> getAllGuilds();
